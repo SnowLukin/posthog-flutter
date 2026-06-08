@@ -14,6 +14,7 @@ import 'utils/capture_utils.dart';
 import 'utils/property_normalizer.dart';
 
 import 'feature_flag_result.dart';
+import 'logs/posthog_log_severity.dart';
 import 'posthog_config.dart';
 import 'posthog_constants.dart';
 import 'posthog_event.dart';
@@ -64,6 +65,9 @@ class PosthogFlutterIO extends PosthogFlutterPlatformInterface {
   /// Applies a single beforeSend callback safely.
   /// Returns null if event should be dropped, otherwise returns the (possibly modified) event.
   /// Handles both synchronous and asynchronous callbacks via FutureOr.
+  ///
+  /// Mirrors the logs equivalent `Posthog._applyBeforeSendLog`; keep their
+  /// exception-handling semantics in sync.
   Future<PostHogEvent?> _applyBeforeSendCallback(
     BeforeSendCallback callback,
     PostHogEvent event,
@@ -367,6 +371,37 @@ class PosthogFlutterIO extends PosthogFlutterPlatformInterface {
       });
     } on PlatformException catch (exception) {
       printIfDebug('Exeption on screen: $exception');
+    }
+  }
+
+  @override
+  Future<void> captureLog({
+    required String body,
+    PostHogLogSeverity level = PostHogLogSeverity.info,
+    Map<String, Object>? attributes,
+    String? traceId,
+    String? spanId,
+    int? traceFlags,
+  }) async {
+    if (!isSupportedPlatform()) {
+      return;
+    }
+
+    try {
+      final normalizedAttributes =
+          attributes != null ? PropertyNormalizer.normalize(attributes) : null;
+
+      await _methodChannel.invokeMethod('captureLog', {
+        'body': body,
+        'level': level.name,
+        if (normalizedAttributes != null) 'attributes': normalizedAttributes,
+        if (traceId != null) 'traceId': traceId,
+        if (spanId != null) 'spanId': spanId,
+        // traceFlags 0 is meaningful (W3C sampled-false); only omit when null.
+        if (traceFlags != null) 'traceFlags': traceFlags,
+      });
+    } on PlatformException catch (exception) {
+      printIfDebug('Exception on captureLog: $exception');
     }
   }
 

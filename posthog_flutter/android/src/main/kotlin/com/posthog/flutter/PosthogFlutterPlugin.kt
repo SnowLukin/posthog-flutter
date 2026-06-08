@@ -15,6 +15,7 @@ import com.posthog.PostHogOnFeatureFlags
 import com.posthog.android.PostHogAndroid
 import com.posthog.android.PostHogAndroidConfig
 import com.posthog.android.internal.getApplicationInfo
+import com.posthog.logs.PostHogLogSeverity
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -124,6 +125,10 @@ class PosthogFlutterPlugin :
 
             "screen" -> {
                 screen(call, result)
+            }
+
+            "captureLog" -> {
+                captureLog(call, result)
             }
 
             "alias" -> {
@@ -401,6 +406,41 @@ class PosthogFlutterPlugin :
                     }
                 }
 
+                // Configure logs (beforeSend runs Dart-side). Each field is only
+                // present when the user set it; unset fields keep native defaults.
+                posthogConfig.getIfNotNull<Map<String, Any>>("logs") { logsConfig ->
+                    logsConfig.getIfNotNull<String>("serviceName") {
+                        logs.serviceName = it
+                    }
+                    logsConfig.getIfNotNull<String>("serviceVersion") {
+                        logs.serviceVersion = it
+                    }
+                    logsConfig.getIfNotNull<String>("environment") {
+                        logs.environment = it
+                    }
+                    logsConfig.getIfNotNull<Map<String, Any>>("resourceAttributes") {
+                        logs.resourceAttributes = it
+                    }
+                    logsConfig.getIfNotNull<Int>("flushIntervalSeconds") {
+                        logs.flushIntervalSeconds = it
+                    }
+                    logsConfig.getIfNotNull<Int>("flushAt") {
+                        logs.flushAt = it
+                    }
+                    logsConfig.getIfNotNull<Int>("maxBatchSize") {
+                        logs.maxBatchSize = it
+                    }
+                    logsConfig.getIfNotNull<Int>("maxBufferSize") {
+                        logs.maxBufferSize = it
+                    }
+                    logsConfig.getIfNotNull<Int>("rateCapMaxLogs") {
+                        logs.rateCapMaxLogs = it
+                    }
+                    logsConfig.getIfNotNull<Int>("rateCapWindowSeconds") {
+                        logs.rateCapWindowSeconds = it
+                    }
+                }
+
                 sdkName = "posthog-flutter"
                 sdkVersion = postHogVersion
 
@@ -552,6 +592,27 @@ class PosthogFlutterPlugin :
             val screenName: String = call.argument("screenName")!!
             val properties: Map<String, Any>? = call.argument("properties")
             PostHog.screen(screenName, properties)
+            result.success(null)
+        } catch (e: Throwable) {
+            result.error("PosthogFlutterException", e.localizedMessage, null)
+        }
+    }
+
+    private fun captureLog(
+        call: MethodCall,
+        result: Result,
+    ) {
+        try {
+            val body: String = call.argument("body")!!
+            val level: String = call.argument("level") ?: "info"
+            val attributes: Map<String, Any>? = call.argument("attributes")
+            val traceId: String? = call.argument("traceId")
+            val spanId: String? = call.argument("spanId")
+            // traceFlags 0 is meaningful (W3C sampled-false); null omits it.
+            val traceFlags: Int? = call.argument("traceFlags")
+            // Unknown levels fall back to INFO.
+            val severity = PostHogLogSeverity.from(level) ?: PostHogLogSeverity.INFO
+            PostHog.captureLog(body, severity, attributes, traceId, spanId, traceFlags)
             result.success(null)
         } catch (e: Throwable) {
             result.error("PosthogFlutterException", e.localizedMessage, null)

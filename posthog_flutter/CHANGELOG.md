@@ -1,5 +1,21 @@
 ## Next
 
+### Minor Changes
+
+- Add a logs API: `Posthog().captureLog(body:, level:, attributes:, traceId:, spanId:, traceFlags:)` and the `Posthog().logger.{trace,debug,info,warn,error,fatal}(body, attributes?)` facade for shipping structured log records. Capture is forwarded to the native iOS/Android SDKs (and posthog-js on web), which handle batching, persistence, rate-capping, and OTLP transport. Auto-captured context (distinct id, session id, screen name, app state, active feature flags) is added natively.
+
+  Configure via `config.logs`: identity (`serviceName`, `serviceVersion`, `environment`, `resourceAttributes`) and tuning (`flushInterval`, `flushAt`, `maxBatchSize`, `maxBufferSize`, `rateCapMaxLogs`, `rateCapWindow`). Every field is optional — unset fields keep the native default. Drop/redact records with `config.logs.beforeSend`, which runs in Dart on all platforms. On Flutter web, `config.logs` is not applied (configure logs in your `posthog.init({...})` instead); only `beforeSend` runs on web.
+
+  ```dart
+  Posthog().logger.info('checkout completed', {'order_id': 'ord_789'});
+  await Posthog().captureLog(body: 'payment failed', level: PostHogLogSeverity.error);
+  ```
+
+  **Notes:**
+  - The optional W3C trace fields (`traceId`/`spanId`/`traceFlags`) correlate a log with a distributed trace; they pass through unchanged and are not visible to `beforeSend`. They are available on `captureLog` only (not the `logger` facade) on all platforms — iOS, Android, and web.
+  - `beforeSend` runs Dart-side on web as well (posthog-js has no native logs `beforeSend`); web requires a recent posthog-js build that exposes `captureLog`.
+  - Raises the `posthog-android` lower bound to `3.48.0`, the first release with the public `captureLog` W3C trace API ([#553](https://github.com/PostHog/posthog-android/pull/553)).
+
 ## 5.26.0
 
 ### Minor Changes
