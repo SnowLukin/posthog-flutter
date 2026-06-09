@@ -60,8 +60,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
 
     // posthog_dart не грузит флаги на старте сам, поэтому honor preloadFeatureFlags
     // вручную - иначе флаги пустые до первого identify/reload (как на нативе).
+    // Через собственный guarded-метод: голый reloadFeatureFlagsAsync() кидает,
+    // и его rejected future из setup-пути никем не обработан.
     if (config.preloadFeatureFlags) {
-      unawaited(client.reloadFeatureFlagsAsync());
+      // ignore: unawaited_futures
+      reloadFeatureFlags();
     }
   }
 
