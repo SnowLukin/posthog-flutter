@@ -452,7 +452,11 @@ abstract class PostHogCore extends PostHogCoreStateless {
   Future<PostHogFlagsResponse?> _doFlagsAsync(
       _FlagsAsyncOptions options) async {
     final completer = Completer<PostHogFlagsResponse?>();
-    _flagsResponseFuture = completer.future;
+    // The shared future usually has no listener (only a 3rd+ concurrent
+    // caller awaits it), so without ignore() completeError would surface as
+    // an unhandled async error even when the direct caller handled the
+    // rethrown exception.
+    _flagsResponseFuture = completer.future..ignore();
 
     try {
       final distinctId = getDistinctId();
