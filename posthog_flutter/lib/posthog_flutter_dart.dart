@@ -416,18 +416,17 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     }
 
     final sep = Platform.pathSeparator;
-    final scope = projectToken.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-    final root = (base != null && base.isNotEmpty)
-        ? Directory('$base${sep}posthog$sep$scope')
-        : Directory('${Directory.systemTemp.path}${sep}posthog$sep$scope');
-
-    try {
-      if (!root.existsSync()) {
-        root.createSync(recursive: true);
-      }
-      return root.path;
-    } catch (_) {
-      return Directory.systemTemp.path;
+    var scope = projectToken.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    if (scope.isEmpty || scope == '.' || scope == '..') {
+      scope = 'default';
     }
+    // Каталог не создаётся здесь: FileStorage сам делает createSync перед
+    // записью, а нечитаемость покрыта его degraded-механикой. Любой фоллбек
+    // обязан оставаться скоупленным - нескоупленный путь возвращает общий
+    // межпроектный стор.
+    final base0 = (base != null && base.isNotEmpty)
+        ? base
+        : Directory.systemTemp.path;
+    return '$base0${sep}posthog$sep$scope';
   }
 }
