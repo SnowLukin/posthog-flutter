@@ -913,12 +913,16 @@ abstract class PostHogCore extends PostHogCoreStateless {
 
     final props = (message['properties'] as Map<String, Object?>?) ?? {};
     final timestamp = message['timestamp'];
+    // Internal messages legitimately carry null values (e.g.
+    // $feature_flag_response for a missing flag) and $set/$set_once maps of
+    // looser runtime types, so the event copy is built defensively instead of
+    // with throwing casts.
     final event = PostHogEvent(
       uuid: message['uuid'] as String,
       event: message['event'] as String,
-      properties: Map<String, Object>.from(props),
-      userProperties: props[r'$set'] as Map<String, Object>?,
-      userPropertiesSetOnce: props[r'$set_once'] as Map<String, Object>?,
+      properties: _nonNullProperties(props),
+      userProperties: _asPropertyMap(props[r'$set']),
+      userPropertiesSetOnce: _asPropertyMap(props[r'$set_once']),
       timestamp: timestamp is String ? DateTime.parse(timestamp) : null,
     );
 
@@ -958,53 +962,78 @@ abstract class PostHogCore extends PostHogCoreStateless {
   }
 
   FutureOr<PostHogEvent?> _runBeforeSend(PostHogEvent event) {
-    if (_beforeSend == null) return event;
+    final callbacks = _beforeSend;
+    if (callbacks == null) return event;
 
     PostHogEvent? result = event;
-    bool hasAsync = false;
-
-    // Check if any callback returns a Future
-    for (final fn in _beforeSend) {
+    for (var i = 0; i < callbacks.length; i++) {
       try {
-        final fnResult = fn(result!);
+        final fnResult = callbacks[i](result!);
         if (fnResult is Future<PostHogEvent?>) {
-          hasAsync = true;
-          break;
+          // Continue the chain from this point: re-running the whole list
+          // would execute earlier callbacks twice (duplicated side effects)
+          // while the abandoned first future keeps mutating the same event.
+          return _continueBeforeSendAsync(fnResult, result, i + 1, event.event);
         }
         result = fnResult;
-        if (result == null) {
-          logger.info(
-              "Event '${event.event}' was rejected in beforeSend callback");
-          return null;
-        }
       } catch (e) {
         logger.error(
             "Error in beforeSend callback for event '${event.event}':", e);
       }
-    }
-
-    if (!hasAsync) return result;
-
-    // Re-run with async handling
-    return _runBeforeSendAsync(event);
-  }
-
-  Future<PostHogEvent?> _runBeforeSendAsync(PostHogEvent event) async {
-    PostHogEvent? result = event;
-    for (final fn in _beforeSend!) {
-      try {
-        final fnResult = fn(result!);
-        result = fnResult is Future<PostHogEvent?> ? await fnResult : fnResult;
-        if (result == null) {
-          logger.info(
-              "Event '${event.event}' was rejected in beforeSend callback");
-          return null;
-        }
-      } catch (e) {
-        logger.error(
-            "Error in beforeSend callback for event '${event.event}':", e);
+      if (result == null) {
+        logger.info(
+            "Event '${event.event}' was rejected in beforeSend callback");
+        return null;
       }
     }
     return result;
+  }
+
+  Future<PostHogEvent?> _continueBeforeSendAsync(
+    Future<PostHogEvent?> pending,
+    PostHogEvent fallback,
+    int nextIndex,
+    String eventName,
+  ) async {
+    final callbacks = _beforeSend!;
+    PostHogEvent? result;
+    try {
+      result = await pending;
+    } catch (e) {
+      logger.error("Error in beforeSend callback for event '$eventName':", e);
+      result = fallback;
+    }
+    if (result == null) {
+      logger.info("Event '$eventName' was rejected in beforeSend callback");
+      return null;
+    }
+    for (var i = nextIndex; i < callbacks.length; i++) {
+      try {
+        final fnResult = callbacks[i](result!);
+        result = fnResult is Future<PostHogEvent?> ? await fnResult : fnResult;
+      } catch (e) {
+        logger.error("Error in beforeSend callback for event '$eventName':", e);
+      }
+      if (result == null) {
+        logger.info("Event '$eventName' was rejected in beforeSend callback");
+        return null;
+      }
+    }
+    return result;
+  }
+
+  static Map<String, Object> _nonNullProperties(Map<String, Object?> map) {
+    return {
+      for (final entry in map.entries)
+        if (entry.value != null) entry.key: entry.value as Object,
+    };
+  }
+
+  static Map<String, Object>? _asPropertyMap(Object? value) {
+    if (value is! Map) return null;
+    return {
+      for (final entry in value.entries)
+        if (entry.value != null) entry.key.toString(): entry.value as Object,
+    };
   }
 }
