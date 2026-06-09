@@ -64,13 +64,42 @@ class FileStorage implements PostHogStorage {
     }
 
     if (_pendingWrites.isNotEmpty || _pendingRemovals.isNotEmpty) {
-      _cache!.addAll(_pendingWrites);
+      for (final entry in _pendingWrites.entries) {
+        _cache![entry.key] =
+            _mergePending(entry.key, _cache![entry.key], entry.value);
+      }
       _pendingRemovals.forEach(_cache!.remove);
       _pendingWrites.clear();
       _pendingRemovals.clear();
       _writeSnapshot();
     }
     return _cache;
+  }
+
+  /// Merge-политика для значений, записанных при нечитаемом диске: значение,
+  /// собранное из null-чтения во время окна, не должно слепо затирать
+  /// хорошие persisted-данные.
+  static Object? _mergePending(String key, Object? disk, Object? pending) {
+    if (disk == null) return pending;
+    if (key == PostHogPersistedProperty.queue.key) {
+      // События окна встают после накопленного на диске бэклога.
+      if (disk is List && pending is List) return [...disk, ...pending];
+      return pending;
+    }
+    if (key == PostHogPersistedProperty.anonymousId.key ||
+        key == PostHogPersistedProperty.sessionId.key ||
+        key == PostHogPersistedProperty.sessionStartTimestamp.key) {
+      // Generated-if-absent identity: побеждает диск - uuid, сгенерированный
+      // в окне, расколол бы историю пользователя.
+      return disk;
+    }
+    if (disk is Map && pending is Map) {
+      // Аккумуляторы (props, person/group properties): union, записи окна
+      // сверху.
+      return {...disk, ...pending};
+    }
+    // Осознанные перезаписи (distinct_id, opted_out, ...): последняя побеждает.
+    return pending;
   }
 
   void _writeSnapshot() {
@@ -103,12 +132,14 @@ class FileStorage implements PostHogStorage {
 
   @override
   T? getProperty<T>(PostHogPersistedProperty key) {
+    // Сначала попытка загрузки: при восстановлении диска именно она мержит
+    // и очищает pending, иначе pending-ключи навсегда обходили бы merge.
+    final data = _tryLoadCache();
     if (_pendingRemovals.contains(key.key)) return null;
     Object? value;
     if (_pendingWrites.containsKey(key.key)) {
       value = _pendingWrites[key.key];
     } else {
-      final data = _tryLoadCache();
       if (data == null) return null;
       value = data[key.key];
     }

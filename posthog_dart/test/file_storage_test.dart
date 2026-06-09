@@ -126,5 +126,44 @@ void main() {
           fresh.getProperty<String>(PostHogPersistedProperty.sessionId),
           'sess');
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
+
+    test('recovery merge keeps the disk backlog and identity', () {
+      final dir = Directory.systemTemp.createTempSync('posthog_storage_merge');
+      final seed = FileStorage(dir.path);
+      seed.setProperty(PostHogPersistedProperty.queue, <Object?>[
+        {'message': 'backlog-1'},
+      ]);
+      seed.setProperty(PostHogPersistedProperty.anonymousId, 'anon-disk');
+
+      final dataFile = '${dir.path}/posthog_data.json';
+      Process.runSync('chmod', ['000', dataFile]);
+      addTearDown(() {
+        Process.runSync('chmod', ['644', dataFile]);
+        dir.deleteSync(recursive: true);
+      });
+
+      // Во время окна core читает null и пересобирает значения с нуля.
+      final blind = FileStorage(dir.path);
+      blind.setProperty(PostHogPersistedProperty.queue, <Object?>[
+        {'message': 'window-1'},
+      ]);
+      blind.setProperty(PostHogPersistedProperty.anonymousId, 'anon-window');
+      blind.setProperty(PostHogPersistedProperty.distinctId, 'user-window');
+
+      Process.runSync('chmod', ['644', dataFile]);
+      final queue =
+          blind.getProperty<List<Object?>>(PostHogPersistedProperty.queue);
+      expect(queue, hasLength(2));
+      expect((queue![0] as Map)['message'], 'backlog-1');
+      expect((queue[1] as Map)['message'], 'window-1');
+      // Identity с диска побеждает сгенерированную в окне.
+      expect(
+          blind.getProperty<String>(PostHogPersistedProperty.anonymousId),
+          'anon-disk');
+      // Явная перезапись из окна побеждает.
+      expect(
+          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'user-window');
+    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
   });
 }
