@@ -60,8 +60,10 @@ flutter:
         fileName: posthog_flutter_web.dart
       linux:
         dartPluginClass: PosthogFlutterDart
+        dartFileName: posthog_flutter_dart.dart
       windows:
         dartPluginClass: PosthogFlutterDart
+        dartFileName: posthog_flutter_dart.dart
 
   # To add assets to your plugin package, add an assets section, like this:
   # assets:
