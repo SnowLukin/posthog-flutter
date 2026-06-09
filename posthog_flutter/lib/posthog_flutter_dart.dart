@@ -8,6 +8,7 @@ import 'src/posthog_config.dart';
 import 'src/posthog_event.dart';
 import 'src/posthog_flutter_platform_interface.dart';
 import 'src/util/logging.dart';
+import 'src/utils/property_normalizer.dart';
 
 /// Реализация плагина под desktop (Windows/Linux) поверх pure-Dart posthog_dart.
 ///
@@ -70,15 +71,9 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     Map<String, Object>? userProperties,
     Map<String, Object>? userPropertiesSetOnce,
   }) async {
-    final properties = <String, Object?>{
-      if (userProperties != null && userProperties.isNotEmpty)
-        r'$set': userProperties,
-      if (userPropertiesSetOnce != null && userPropertiesSetOnce.isNotEmpty)
-        r'$set_once': userPropertiesSetOnce,
-    };
     _client?.identify(
       userId,
-      properties: properties.isNotEmpty ? properties : null,
+      properties: _mergeUserProps(null, userProperties, userPropertiesSetOnce),
     );
   }
 
@@ -88,8 +83,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     Map<String, Object>? userPropertiesToSetOnce,
   }) async {
     _client?.setPersonProperties(
-      userPropertiesToSet: userPropertiesToSet,
-      userPropertiesToSetOnce: userPropertiesToSetOnce,
+      userPropertiesToSet: _normalize(userPropertiesToSet),
+      userPropertiesToSetOnce: _normalize(userPropertiesToSetOnce),
     );
   }
 
@@ -119,7 +114,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       r'$screen',
       properties: <String, Object?>{
         r'$screen_name': screenName,
-        ...?properties,
+        ...?_normalize(properties),
       },
     );
   }
@@ -166,7 +161,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
 
   @override
   Future<void> register(String key, Object value) async {
-    _client?.register({key: value});
+    _client?.register(PropertyNormalizer.normalize({key: value}));
   }
 
   @override
@@ -197,7 +192,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     _client?.group(
       groupType,
       groupKey,
-      groupProperties: groupProperties,
+      groupProperties: _normalize(groupProperties),
     );
   }
 
@@ -257,7 +252,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       properties: <String, Object?>{
         r'$exception_message': error.toString(),
         if (stackTrace != null) r'$exception_stack_trace_raw': stackTrace.toString(),
-        ...?properties,
+        ...?_normalize(properties),
       },
     );
   }
@@ -309,14 +304,22 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     Map<String, Object>? userProperties,
     Map<String, Object>? userPropertiesSetOnce,
   ) {
+    final set = _normalize(userProperties);
+    final setOnce = _normalize(userPropertiesSetOnce);
     final merged = <String, Object?>{
-      ...?properties,
-      if (userProperties != null && userProperties.isNotEmpty)
-        r'$set': userProperties,
-      if (userPropertiesSetOnce != null && userPropertiesSetOnce.isNotEmpty)
-        r'$set_once': userPropertiesSetOnce,
+      ...?_normalize(properties),
+      if (set != null && set.isNotEmpty) r'$set': set,
+      if (setOnce != null && setOnce.isNotEmpty) r'$set_once': setOnce,
     };
     return merged.isNotEmpty ? merged : null;
+  }
+
+  /// На нативе properties проходят PropertyNormalizer перед method channel;
+  /// здесь та же нормализация защищает jsonEncode в FileStorage и /batch/ от
+  /// несериализуемых значений (DateTime, enum, произвольные объекты).
+  Map<String, Object>? _normalize(Map<String, Object>? properties) {
+    if (properties == null || properties.isEmpty) return properties;
+    return Map<String, Object>.from(PropertyNormalizer.normalize(properties));
   }
 
   pd.PostHogPersonProfiles _mapPersonProfiles(PostHogPersonProfiles value) {
@@ -360,9 +363,10 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
 
         pdEvent
           ..event = flutterEvent.event
-          ..properties = flutterEvent.properties
-          ..userProperties = flutterEvent.userProperties
-          ..userPropertiesSetOnce = flutterEvent.userPropertiesSetOnce;
+          ..properties = _normalize(flutterEvent.properties)
+          ..userProperties = _normalize(flutterEvent.userProperties)
+          ..userPropertiesSetOnce =
+              _normalize(flutterEvent.userPropertiesSetOnce);
         return pdEvent;
       },
     ];
