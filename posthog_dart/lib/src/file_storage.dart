@@ -104,12 +104,17 @@ class FileStorage implements PostHogStorage {
   @override
   T? getProperty<T>(PostHogPersistedProperty key) {
     if (_pendingRemovals.contains(key.key)) return null;
+    Object? value;
     if (_pendingWrites.containsKey(key.key)) {
-      return _pendingWrites[key.key] as T?;
+      value = _pendingWrites[key.key];
+    } else {
+      final data = _tryLoadCache();
+      if (data == null) return null;
+      value = data[key.key];
     }
-    final data = _tryLoadCache();
-    if (data == null) return null;
-    return data[key.key] as T?;
+    // Содержимому общего стора нельзя доверять: значение неожиданного типа
+    // (другой писатель, version skew) не должно кидать в host app.
+    return value is T ? value : null;
   }
 
   @override

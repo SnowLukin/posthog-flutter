@@ -59,6 +59,28 @@ void main() {
           'b');
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
 
+    test('value of an unexpected type reads as null instead of throwing', () {
+      final dir = Directory.systemTemp.createTempSync('posthog_storage_type');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final storage = FileStorage(dir.path);
+
+      storage.setProperty<Object>(PostHogPersistedProperty.queue, 'garbage');
+
+      expect(
+          storage
+              .getProperty<List<Object?>>(PostHogPersistedProperty.queue),
+          isNull);
+      expect(
+          storage.getProperty<String>(PostHogPersistedProperty.queue),
+          'garbage');
+
+      final memory = InMemoryStorage();
+      memory.setProperty<Object>(PostHogPersistedProperty.distinctId, 42);
+      expect(
+          memory.getProperty<String>(PostHogPersistedProperty.distinctId),
+          isNull);
+    });
+
     test('mutations during a read-failure window survive in memory and merge',
         () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_rd');

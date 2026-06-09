@@ -12,7 +12,8 @@ class InMemoryStorage implements PostHogStorage {
 
   @override
   T? getProperty<T>(PostHogPersistedProperty key) {
-    return _data[key.key] as T?;
+    final value = _data[key.key];
+    return value is T ? value : null;
   }
 
   @override
