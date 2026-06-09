@@ -71,7 +71,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
             personProfiles: _mapPersonProfiles(config.personProfiles),
             beforeSend: _bridgeBeforeSend(config.beforeSend),
           ),
-          storage: pd.FileStorage(_resolveStorageDir()),
+          storage: pd.FileStorage(_resolveStorageDir(config.projectToken)),
         );
         _client = client;
 
@@ -396,7 +396,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
   /// Каталог для FileStorage без path_provider — на уровне библиотеки путь
   /// резолвится из env. Windows: APPDATA (fallback LOCALAPPDATA);
   /// Linux: XDG_DATA_HOME (fallback ~/.local/share). При неудаче — systemTemp.
-  String _resolveStorageDir() {
+  ///
+  /// Стор скоупится по project token: общий на всех каталог означал бы, что
+  /// разные приложения/проекты на этом плагине делят distinct_id, consent и
+  /// очередь (события одного проекта уезжали бы с api_key другого).
+  String _resolveStorageDir(String projectToken) {
     final env = Platform.environment;
     String? base;
     if (Platform.isWindows) {
@@ -411,10 +415,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       }
     }
 
+    final sep = Platform.pathSeparator;
+    final scope = projectToken.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     final root = (base != null && base.isNotEmpty)
-        ? Directory('$base${Platform.pathSeparator}posthog')
-        : Directory('${Directory.systemTemp.path}'
-            '${Platform.pathSeparator}posthog');
+        ? Directory('$base${sep}posthog$sep$scope')
+        : Directory('${Directory.systemTemp.path}${sep}posthog$sep$scope');
 
     try {
       if (!root.existsSync()) {
