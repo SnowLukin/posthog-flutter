@@ -354,11 +354,17 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
         );
 
         for (final callback in callbacks) {
-          final result = callback(flutterEvent);
-          final resolved =
-              result is Future<PostHogEvent?> ? await result : result;
-          if (resolved == null) return null;
-          flutterEvent = resolved;
+          try {
+            final result = callback(flutterEvent);
+            final resolved =
+                result is Future<PostHogEvent?> ? await result : result;
+            if (resolved == null) return null;
+            flutterEvent = resolved;
+          } catch (e) {
+            // Контракт PostHogConfig.beforeSend: упавший колбэк пропускается,
+            // цепочка продолжается с текущим событием (как на нативе).
+            printIfDebug('[PostHog] beforeSend callback threw exception: $e');
+          }
         }
 
         pdEvent
