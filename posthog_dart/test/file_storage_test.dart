@@ -57,7 +57,7 @@ void main() {
       expect(
           storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'b');
-    });
+    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
 
     test('transient read failure does not clobber persisted data', () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_rd');
@@ -85,6 +85,6 @@ void main() {
           FileStorage(dir.path)
               .getProperty<String>(PostHogPersistedProperty.distinctId),
           'keep');
-    });
+    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
   });
 }
