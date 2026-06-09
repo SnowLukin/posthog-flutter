@@ -40,6 +40,9 @@ class FileStorage implements PostHogStorage {
 
   String get _filePath => p.join(_directoryPath, _fileName);
 
+  @override
+  bool get isDegraded => _tryLoadCache() == null;
+
   /// Returns the authoritative store, or null while the disk is unreadable.
   Map<String, Object?>? _tryLoadCache() {
     if (_cache == null) {

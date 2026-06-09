@@ -3,6 +3,11 @@ import 'package:test/test.dart';
 
 import 'test_client.dart';
 
+class _DegradedStorage extends InMemoryStorage {
+  @override
+  bool get isDegraded => true;
+}
+
 void main() {
   group('opt-out', () {
     test('optOut: true blocks events until optIn()', () {
@@ -38,6 +43,19 @@ void main() {
       expect(client.optedOut, isTrue);
       client.capture('evt');
       expect(getQueue(storage), isEmpty);
+    });
+
+    test('consent fails closed while the store is unreadable', () {
+      final storage = _DegradedStorage();
+      final client = TestClient('k', options: testOptions(), storage: storage);
+
+      client.capture('evt');
+      expect(getQueue(storage), isEmpty);
+
+      // An explicit opt-in during the window lifts the block.
+      client.optIn();
+      client.capture('evt');
+      expect(getQueue(storage), hasLength(1));
     });
   });
 }

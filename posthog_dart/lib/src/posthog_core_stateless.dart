@@ -161,9 +161,15 @@ abstract class PostHogCoreStateless {
   }
 
   /// Whether the user has opted out.
-  bool get optedOut =>
-      getPersistedProperty<bool>(PostHogPersistedProperty.optedOut) ??
-      !_defaultOptIn;
+  bool get optedOut {
+    final stored =
+        getPersistedProperty<bool>(PostHogPersistedProperty.optedOut);
+    if (stored != null) return stored;
+    // While the store is unreadable the consent state is unknown: fail
+    // closed - a user who may have opted out must not be tracked.
+    if (storage.isDegraded) return true;
+    return !_defaultOptIn;
+  }
 
   /// Opt in to tracking.
   void optIn() {
