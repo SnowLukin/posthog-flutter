@@ -55,6 +55,12 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       _featureFlagsUnsubscribe =
           client.onFeatureFlags((_) => config.onFeatureFlags?.call());
     }
+
+    // posthog_dart не грузит флаги на старте сам, поэтому honor preloadFeatureFlags
+    // вручную - иначе флаги пустые до первого identify/reload (как на нативе).
+    if (config.preloadFeatureFlags) {
+      unawaited(client.reloadFeatureFlagsAsync());
+    }
   }
 
   @override
