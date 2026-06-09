@@ -7,3 +7,7 @@ export 'src/posthog_event.dart';
 export 'src/posthog_observer.dart';
 export 'src/posthog_widget.dart';
 export 'src/replay/mask/posthog_mask_widget.dart';
+// Desktop (Windows/Linux) идёт на pure-Dart реализацию через dart:io;
+// на web - пустая заглушка (там работает PosthogFlutterWeb).
+export 'src/posthog_flutter_dart_stub.dart'
+    if (dart.library.io) 'posthog_flutter_dart.dart';
