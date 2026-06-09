@@ -330,8 +330,10 @@ abstract class PostHogCoreStateless {
   Future<GetFlagsResult> getFlags(
     String distinctId, {
     Map<String, Object> groups = const {},
-    Map<String, String> personProperties = const {},
-    Map<String, Map<String, String>> groupProperties = const {},
+    // The /flags API accepts arbitrary JSON property values (bool/int/...),
+    // so the parameters must not force String values.
+    Map<String, Object?> personProperties = const {},
+    Map<String, Map<String, Object?>> groupProperties = const {},
     Map<String, Object?> extraPayload = const {},
   }) async {
     final url = '$host/flags/?v=2&config=true';

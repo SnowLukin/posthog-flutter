@@ -471,9 +471,9 @@ abstract class PostHogCore extends PostHogCoreStateless {
       final result = await getFlags(
         distinctId,
         groups: groupsMap.cast<String, Object>(),
-        personProperties: personProperties.cast<String, String>(),
-        groupProperties: groupProperties
-            .map((k, v) => MapEntry(k, (v as Map).cast<String, String>())),
+        personProperties: personProperties,
+        groupProperties: groupProperties.map((k, v) => MapEntry(
+            k, v is Map ? Map<String, Object?>.from(v) : <String, Object?>{})),
         extraPayload: extraProperties,
       );
 
