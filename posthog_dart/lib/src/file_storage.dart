@@ -46,26 +46,33 @@ class FileStorage implements PostHogStorage {
   /// Returns the authoritative store, or null while the disk is unreadable.
   Map<String, Object?>? _tryLoadCache() {
     if (_cache == null) {
-      final String content;
+      final List<int> bytes;
       try {
         final file = File(_filePath);
         if (!file.existsSync()) {
           _cache = {};
-        } else {
-          content = file.readAsStringSync();
-          try {
-            _cache = jsonDecode(content) as Map<String, Object?>;
-          } catch (_) {
-            // Corrupt content: resetting to an empty store is the only option.
-            _cache = {};
-          }
+          return _finishLoad();
         }
+        bytes = file.readAsBytesSync();
       } catch (_) {
         // Transient IO failure: the on-disk state is unknown.
         return null;
       }
+      try {
+        // allowMalformed: invalid UTF-8 (e.g. a torn write) is corrupt
+        // content, not a transient failure - it must reset the store, not
+        // brick it into a permanent degraded mode.
+        final content = utf8.decode(bytes, allowMalformed: true);
+        _cache = jsonDecode(content) as Map<String, Object?>;
+      } catch (_) {
+        // Corrupt content: resetting to an empty store is the only option.
+        _cache = {};
+      }
     }
+    return _finishLoad();
+  }
 
+  Map<String, Object?> _finishLoad() {
     if (_pendingWrites.isNotEmpty || _pendingRemovals.isNotEmpty) {
       for (final entry in _pendingWrites.entries) {
         _cache![entry.key] =
@@ -76,32 +83,32 @@ class FileStorage implements PostHogStorage {
       _pendingRemovals.clear();
       _writeSnapshot();
     }
-    return _cache;
+    return _cache!;
   }
 
-  /// Merge-политика для значений, записанных при нечитаемом диске: значение,
-  /// собранное из null-чтения во время окна, не должно слепо затирать
-  /// хорошие persisted-данные.
+  /// Merge policy for values written while the disk was unreadable: a value
+  /// rebuilt from a null read during the window must not blindly replace
+  /// good persisted data.
   static Object? _mergePending(String key, Object? disk, Object? pending) {
     if (disk == null) return pending;
     if (key == PostHogPersistedProperty.queue.key) {
-      // События окна встают после накопленного на диске бэклога.
+      // Window events go after the persisted backlog.
       if (disk is List && pending is List) return [...disk, ...pending];
       return pending;
     }
     if (key == PostHogPersistedProperty.anonymousId.key ||
         key == PostHogPersistedProperty.sessionId.key ||
         key == PostHogPersistedProperty.sessionStartTimestamp.key) {
-      // Generated-if-absent identity: побеждает диск - uuid, сгенерированный
-      // в окне, расколол бы историю пользователя.
+      // Generated-if-absent identity: the disk wins - a uuid generated
+      // during the window would split the user's history.
       return disk;
     }
     if (disk is Map && pending is Map) {
-      // Аккумуляторы (props, person/group properties): union, записи окна
-      // сверху.
+      // Accumulator maps (props, person/group properties): union with the
+      // window's writes on top.
       return {...disk, ...pending};
     }
-    // Осознанные перезаписи (distinct_id, opted_out, ...): последняя побеждает.
+    // Explicit overwrites (distinct_id, opted_out, ...): latest write wins.
     return pending;
   }
 
@@ -117,7 +124,11 @@ class FileStorage implements PostHogStorage {
       if (!dir.existsSync()) {
         dir.createSync(recursive: true);
       }
-      File(_filePath).writeAsStringSync(payload);
+      // Atomic-on-volume replace: a crash mid-write must never leave a
+      // truncated snapshot in place of the real one.
+      final tmp = File('$_filePath.tmp');
+      tmp.writeAsStringSync(payload, flush: true);
+      tmp.renameSync(_filePath);
     } catch (_) {
       // Transient IO failure: the cache keeps the new state, the next
       // successful write persists the whole snapshot anyway.
@@ -135,8 +146,8 @@ class FileStorage implements PostHogStorage {
 
   @override
   T? getProperty<T>(PostHogPersistedProperty key) {
-    // Сначала попытка загрузки: при восстановлении диска именно она мержит
-    // и очищает pending, иначе pending-ключи навсегда обходили бы merge.
+    // Load first: on disk recovery this is what merges and clears pending,
+    // otherwise pending keys would bypass the merge forever.
     final data = _tryLoadCache();
     if (_pendingRemovals.contains(key.key)) return null;
     Object? value;
@@ -146,8 +157,8 @@ class FileStorage implements PostHogStorage {
       if (data == null) return null;
       value = data[key.key];
     }
-    // Содержимому общего стора нельзя доверять: значение неожиданного типа
-    // (другой писатель, version skew) не должно кидать в host app.
+    // The shared store's content is untrusted: a value of an unexpected
+    // type (another writer, version skew) must not throw into the host app.
     return value is T ? value : null;
   }
 

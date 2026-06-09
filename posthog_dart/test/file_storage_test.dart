@@ -59,6 +59,27 @@ void main() {
           'b');
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
 
+    test('invalid UTF-8 resets the store instead of bricking it', () {
+      final dir = Directory.systemTemp.createTempSync('posthog_storage_utf8');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      // Torn write: a multibyte character truncated mid-sequence.
+      File('${dir.path}/posthog_data.json')
+          .writeAsBytesSync([0x7b, 0x22, 0xd0]);
+
+      final storage = FileStorage(dir.path);
+      expect(storage.isDegraded, isFalse);
+      expect(
+          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+          isNull);
+
+      // Self-heal: the next write persists a fresh valid snapshot.
+      storage.setProperty(PostHogPersistedProperty.distinctId, 'healed');
+      storage.clearCache();
+      expect(
+          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'healed');
+    });
+
     test('value of an unexpected type reads as null instead of throwing', () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_type');
       addTearDown(() => dir.deleteSync(recursive: true));
