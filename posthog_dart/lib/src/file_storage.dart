@@ -31,28 +31,28 @@ class FileStorage implements PostHogStorage {
   Map<String, Object?> _readAll() {
     if (_cache != null) return _cache!;
 
-    final file = File(_filePath);
-    if (!file.existsSync()) {
-      _cache = {};
-      return _cache!;
+    final String content;
+    try {
+      final file = File(_filePath);
+      if (!file.existsSync()) {
+        _cache = {};
+        return _cache!;
+      }
+      content = file.readAsStringSync();
+    } catch (_) {
+      // Transient IO failure (file locked by AV/backup, permissions): the
+      // on-disk state is unknown, so don't cache this empty map - a later
+      // write must not replace good persisted data with it.
+      return {};
     }
 
     try {
-      final content = file.readAsStringSync();
       _cache = jsonDecode(content) as Map<String, Object?>;
     } catch (_) {
+      // Corrupt content: resetting to an empty store is the only option.
       _cache = {};
     }
     return _cache!;
-  }
-
-  void _writeAll() {
-    final file = File(_filePath);
-    final dir = Directory(_directoryPath);
-    if (!dir.existsSync()) {
-      dir.createSync(recursive: true);
-    }
-    file.writeAsStringSync(jsonEncode(_cache ?? {}));
   }
 
   @override
@@ -71,17 +71,38 @@ class FileStorage implements PostHogStorage {
     } else {
       data[key.key] = value;
     }
+
+    // Storage must never throw into the host app (the read path already
+    // swallows errors), but the failure modes differ:
+    // - a non-encodable value is rolled back, otherwise it would fail every
+    //   subsequent write of the shared snapshot;
+    // - a transient IO failure keeps the new value in the cache (consent or
+    //   queue updates must survive the session) - the next successful write
+    //   persists the whole snapshot anyway.
+    final String payload;
     try {
-      _writeAll();
+      payload = jsonEncode(data);
     } catch (_) {
-      // Storage must never throw into the host app (the read path already
-      // swallows errors). Roll back the cache so one non-encodable value or
-      // transient IO failure can't poison every subsequent write.
       if (hadKey) {
         data[key.key] = previous;
       } else {
         data.remove(key.key);
       }
+      return;
+    }
+
+    // Ephemeral map after a failed read: the on-disk state is unknown, so
+    // skip the write instead of clobbering it.
+    if (!identical(data, _cache)) return;
+
+    try {
+      final dir = Directory(_directoryPath);
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+      File(_filePath).writeAsStringSync(payload);
+    } catch (_) {
+      // Transient IO failure - see above.
     }
   }
 
