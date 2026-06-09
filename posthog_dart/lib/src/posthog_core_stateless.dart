@@ -109,7 +109,10 @@ abstract class PostHogCoreStateless {
         _featureFlagsRequestTimeout = options.featureFlagsRequestTimeout,
         _remoteConfigRequestTimeout = options.remoteConfigRequestTimeout,
         _disableGeoip = options.disableGeoip,
-        disabled = options.optOut,
+        // optOut maps to the persisted opted-out state (via _defaultOptIn),
+        // not to the hard `disabled` switch — otherwise optIn() could never
+        // re-enable a client constructed with optOut: true.
+        disabled = false,
         _evaluationContexts = options.evaluationContexts {
     assertNotEmpty(apiKey, "You must pass your PostHog project's api key.");
     logger = PostHogLogger('[PostHog]', _logMsgIfDebug);

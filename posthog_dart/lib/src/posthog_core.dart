@@ -124,6 +124,9 @@ abstract class PostHogCore extends PostHogCoreStateless {
     wrap(() {
       final allKeep = [
         PostHogPersistedProperty.queue,
+        // Consent is not identity state: reset() on logout must not silently
+        // re-enable tracking for a user who explicitly opted out.
+        PostHogPersistedProperty.optedOut,
         ...(propertiesToKeep ?? []),
       ];
 
