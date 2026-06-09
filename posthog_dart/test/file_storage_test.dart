@@ -186,5 +186,55 @@ void main() {
           blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           'user-window');
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
+
+    test('merged accumulator maps stay readable through typed getProperty',
+        () {
+      final dir = Directory.systemTemp.createTempSync('posthog_storage_union');
+      final seed = FileStorage(dir.path);
+      seed.setProperty(PostHogPersistedProperty.props,
+          <String, Object?>{'disk': 1});
+
+      final dataFile = '${dir.path}/posthog_data.json';
+      Process.runSync('chmod', ['000', dataFile]);
+      addTearDown(() {
+        Process.runSync('chmod', ['644', dataFile]);
+        dir.deleteSync(recursive: true);
+      });
+
+      final blind = FileStorage(dir.path);
+      blind.setProperty(PostHogPersistedProperty.props,
+          <String, Object?>{'window': 2});
+
+      Process.runSync('chmod', ['644', dataFile]);
+      final merged = blind.getProperty<Map<String, Object?>>(
+          PostHogPersistedProperty.props);
+      expect(merged, isNotNull);
+      expect(merged!['disk'], 1);
+      expect(merged['window'], 2);
+    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
+
+    test('unreadable directory is degraded, not a fresh store', () {
+      final dir = Directory.systemTemp.createTempSync('posthog_storage_dir');
+      final sub = Directory('${dir.path}/store')..createSync();
+      FileStorage(sub.path)
+          .setProperty(PostHogPersistedProperty.distinctId, 'keep');
+
+      Process.runSync('chmod', ['000', sub.path]);
+      addTearDown(() {
+        Process.runSync('chmod', ['755', sub.path]);
+        dir.deleteSync(recursive: true);
+      });
+
+      final blind = FileStorage(sub.path);
+      expect(blind.isDegraded, isTrue);
+      expect(
+          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+          isNull);
+
+      Process.runSync('chmod', ['755', sub.path]);
+      expect(
+          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'keep');
+    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
   });
 }

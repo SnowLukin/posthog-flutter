@@ -48,12 +48,14 @@ class FileStorage implements PostHogStorage {
     if (_cache == null) {
       final List<int> bytes;
       try {
-        final file = File(_filePath);
-        if (!file.existsSync()) {
-          _cache = {};
-          return _finishLoad();
-        }
-        bytes = file.readAsBytesSync();
+        bytes = File(_filePath).readAsBytesSync();
+      } on PathNotFoundException {
+        // No file (or directory) yet: a genuinely fresh store. Checked via
+        // the read exception, not existsSync() - the latter reports false
+        // on access-denied too, which would misclassify a transient outage
+        // as a fresh store and later overwrite live data.
+        _cache = {};
+        return _finishLoad();
       } catch (_) {
         // Transient IO failure: the on-disk state is unknown.
         return null;
@@ -98,17 +100,32 @@ class FileStorage implements PostHogStorage {
     }
     if (key == PostHogPersistedProperty.anonymousId.key ||
         key == PostHogPersistedProperty.sessionId.key ||
-        key == PostHogPersistedProperty.sessionStartTimestamp.key) {
+        key == PostHogPersistedProperty.sessionStartTimestamp.key ||
+        key == PostHogPersistedProperty.sessionLastTimestamp.key) {
       // Generated-if-absent identity: the disk wins - a uuid generated
-      // during the window would split the user's history.
+      // during the window would split the user's history. The session triple
+      // merges as one unit: a fresh lastTimestamp glued to a stale sessionId
+      // would keep an expired session alive past its expiration.
       return disk;
     }
-    if (disk is Map && pending is Map) {
-      // Accumulator maps (props, person/group properties): union with the
-      // window's writes on top.
-      return {...disk, ...pending};
+    if ((key == PostHogPersistedProperty.props.key ||
+            key == PostHogPersistedProperty.personProperties.key ||
+            key == PostHogPersistedProperty.groupProperties.key) &&
+        disk is Map &&
+        pending is Map) {
+      // Accumulator maps only: union with the window's writes on top. Other
+      // map values (flag details, remote config) have replace semantics - a
+      // union would resurrect stale sibling keys. The result is typed
+      // explicitly: a spread of dynamic maps would reify as
+      // Map<dynamic, dynamic> and fail the typed read back.
+      return <String, Object?>{
+        for (final entry in disk.entries) entry.key.toString(): entry.value,
+        for (final entry in pending.entries)
+          entry.key.toString(): entry.value,
+      };
     }
-    // Explicit overwrites (distinct_id, opted_out, ...): latest write wins.
+    // Explicit overwrites (distinct_id, opted_out, snapshots ...): latest
+    // write wins.
     return pending;
   }
 
