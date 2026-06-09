@@ -59,10 +59,12 @@ void main() {
           'b');
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
 
-    test('transient read failure does not clobber persisted data', () {
+    test('mutations during a read-failure window survive in memory and merge',
+        () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_rd');
-      FileStorage(dir.path)
-          .setProperty(PostHogPersistedProperty.distinctId, 'keep');
+      final seed = FileStorage(dir.path);
+      seed.setProperty(PostHogPersistedProperty.distinctId, 'keep');
+      seed.setProperty(PostHogPersistedProperty.sessionId, 'sess');
 
       final dataFile = '${dir.path}/posthog_data.json';
       Process.runSync('chmod', ['000', dataFile]);
@@ -71,20 +73,36 @@ void main() {
         dir.deleteSync(recursive: true);
       });
 
-      final blindStorage = FileStorage(dir.path);
+      final blind = FileStorage(dir.path);
       expect(
-          blindStorage.getProperty<String>(PostHogPersistedProperty.distinctId),
+          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
       expect(
-          () => blindStorage.setProperty(
-              PostHogPersistedProperty.distinctId, 'clobber'),
+          () => blind.setProperty(
+              PostHogPersistedProperty.distinctId, 'updated'),
           returnsNormally);
+      // Consent/identity updates must survive the degraded window in memory.
+      expect(
+          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'updated');
 
+      // Once the disk is readable again, pending mutations merge over the
+      // on-disk data (unrelated keys intact) and get persisted.
       Process.runSync('chmod', ['644', dataFile]);
       expect(
-          FileStorage(dir.path)
-              .getProperty<String>(PostHogPersistedProperty.distinctId),
-          'keep');
+          blind.getProperty<String>(PostHogPersistedProperty.sessionId),
+          'sess');
+      expect(
+          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'updated');
+
+      final fresh = FileStorage(dir.path);
+      expect(
+          fresh.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'updated');
+      expect(
+          fresh.getProperty<String>(PostHogPersistedProperty.sessionId),
+          'sess');
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
   });
 }

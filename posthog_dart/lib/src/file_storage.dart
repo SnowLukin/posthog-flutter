@@ -19,82 +19,67 @@ import 'storage.dart';
 /// final dir = await getApplicationSupportDirectory();
 /// final storage = FileStorage(dir.path);
 /// ```
+///
+/// Storage never throws into the host app. While the file is unreadable
+/// (locked by AV/backup, permissions), mutations are kept in an in-memory
+/// overlay - consent and identity must survive the session - and are merged
+/// over the on-disk data and persisted once the disk becomes readable again,
+/// so a transient failure never replaces good persisted data.
 class FileStorage implements PostHogStorage {
   final String _directoryPath;
   Map<String, Object?>? _cache;
+
+  // Mutations made while the disk state is unknown: values waiting to be
+  // merged, and tombstones for keys removed during the degraded window.
+  final Map<String, Object?> _pendingWrites = {};
+  final Set<String> _pendingRemovals = {};
+
   static const _fileName = 'posthog_data.json';
 
   FileStorage(this._directoryPath);
 
   String get _filePath => p.join(_directoryPath, _fileName);
 
-  Map<String, Object?> _readAll() {
-    if (_cache != null) return _cache!;
-
-    final String content;
-    try {
-      final file = File(_filePath);
-      if (!file.existsSync()) {
-        _cache = {};
-        return _cache!;
+  /// Returns the authoritative store, or null while the disk is unreadable.
+  Map<String, Object?>? _tryLoadCache() {
+    if (_cache == null) {
+      final String content;
+      try {
+        final file = File(_filePath);
+        if (!file.existsSync()) {
+          _cache = {};
+        } else {
+          content = file.readAsStringSync();
+          try {
+            _cache = jsonDecode(content) as Map<String, Object?>;
+          } catch (_) {
+            // Corrupt content: resetting to an empty store is the only option.
+            _cache = {};
+          }
+        }
+      } catch (_) {
+        // Transient IO failure: the on-disk state is unknown.
+        return null;
       }
-      content = file.readAsStringSync();
-    } catch (_) {
-      // Transient IO failure (file locked by AV/backup, permissions): the
-      // on-disk state is unknown, so don't cache this empty map - a later
-      // write must not replace good persisted data with it.
-      return {};
     }
 
-    try {
-      _cache = jsonDecode(content) as Map<String, Object?>;
-    } catch (_) {
-      // Corrupt content: resetting to an empty store is the only option.
-      _cache = {};
+    if (_pendingWrites.isNotEmpty || _pendingRemovals.isNotEmpty) {
+      _cache!.addAll(_pendingWrites);
+      _pendingRemovals.forEach(_cache!.remove);
+      _pendingWrites.clear();
+      _pendingRemovals.clear();
+      _writeSnapshot();
     }
-    return _cache!;
+    return _cache;
   }
 
-  @override
-  T? getProperty<T>(PostHogPersistedProperty key) {
-    final data = _readAll();
-    return data[key.key] as T?;
-  }
-
-  @override
-  void setProperty<T>(PostHogPersistedProperty key, T? value) {
-    final data = _readAll();
-    final hadKey = data.containsKey(key.key);
-    final previous = data[key.key];
-    if (value == null) {
-      data.remove(key.key);
-    } else {
-      data[key.key] = value;
-    }
-
-    // Storage must never throw into the host app (the read path already
-    // swallows errors), but the failure modes differ:
-    // - a non-encodable value is rolled back, otherwise it would fail every
-    //   subsequent write of the shared snapshot;
-    // - a transient IO failure keeps the new value in the cache (consent or
-    //   queue updates must survive the session) - the next successful write
-    //   persists the whole snapshot anyway.
+  void _writeSnapshot() {
     final String payload;
     try {
-      payload = jsonEncode(data);
+      payload = jsonEncode(_cache);
     } catch (_) {
-      if (hadKey) {
-        data[key.key] = previous;
-      } else {
-        data.remove(key.key);
-      }
       return;
     }
-
-    // Ephemeral map after a failed read: the on-disk state is unknown, so
-    // skip the write instead of clobbering it.
-    if (!identical(data, _cache)) return;
-
     try {
       final dir = Directory(_directoryPath);
       if (!dir.existsSync()) {
@@ -102,8 +87,55 @@ class FileStorage implements PostHogStorage {
       }
       File(_filePath).writeAsStringSync(payload);
     } catch (_) {
-      // Transient IO failure - see above.
+      // Transient IO failure: the cache keeps the new state, the next
+      // successful write persists the whole snapshot anyway.
     }
+  }
+
+  static bool _isEncodable(Object? value) {
+    try {
+      jsonEncode(value);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  T? getProperty<T>(PostHogPersistedProperty key) {
+    if (_pendingRemovals.contains(key.key)) return null;
+    if (_pendingWrites.containsKey(key.key)) {
+      return _pendingWrites[key.key] as T?;
+    }
+    final data = _tryLoadCache();
+    if (data == null) return null;
+    return data[key.key] as T?;
+  }
+
+  @override
+  void setProperty<T>(PostHogPersistedProperty key, T? value) {
+    // A non-encodable value is dropped up front, otherwise it would fail
+    // every subsequent write of the shared snapshot.
+    if (value != null && !_isEncodable(value)) return;
+
+    final data = _tryLoadCache();
+    if (data == null) {
+      if (value == null) {
+        _pendingWrites.remove(key.key);
+        _pendingRemovals.add(key.key);
+      } else {
+        _pendingRemovals.remove(key.key);
+        _pendingWrites[key.key] = value;
+      }
+      return;
+    }
+
+    if (value == null) {
+      data.remove(key.key);
+    } else {
+      data[key.key] = value;
+    }
+    _writeSnapshot();
   }
 
   /// Clears the in-memory cache, forcing next read from disk.
