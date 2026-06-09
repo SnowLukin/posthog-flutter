@@ -35,10 +35,11 @@ void main() {
       final storage = FileStorage(dir.path);
       storage.setProperty(PostHogPersistedProperty.distinctId, 'a');
 
-      final dataFile = '${dir.path}/posthog_data.json';
-      Process.runSync('chmod', ['444', dataFile]);
+      // Snapshots go through tmp+rename, so blocking the write means
+      // removing write permission from the directory, not the file.
+      Process.runSync('chmod', ['555', dir.path]);
       addTearDown(() {
-        Process.runSync('chmod', ['644', dataFile]);
+        Process.runSync('chmod', ['755', dir.path]);
         dir.deleteSync(recursive: true);
       });
 
@@ -51,7 +52,7 @@ void main() {
           storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'b');
 
-      Process.runSync('chmod', ['644', dataFile]);
+      Process.runSync('chmod', ['755', dir.path]);
       storage.setProperty(PostHogPersistedProperty.sessionId, 's');
       storage.clearCache();
       expect(
@@ -163,7 +164,7 @@ void main() {
         dir.deleteSync(recursive: true);
       });
 
-      // Во время окна core читает null и пересобирает значения с нуля.
+      // During the window the core reads null and rebuilds values from scratch.
       final blind = FileStorage(dir.path);
       blind.setProperty(PostHogPersistedProperty.queue, <Object?>[
         {'message': 'window-1'},
@@ -177,11 +178,11 @@ void main() {
       expect(queue, hasLength(2));
       expect((queue![0] as Map)['message'], 'backlog-1');
       expect((queue[1] as Map)['message'], 'window-1');
-      // Identity с диска побеждает сгенерированную в окне.
+      // Disk identity wins over the one generated during the window.
       expect(
           blind.getProperty<String>(PostHogPersistedProperty.anonymousId),
           'anon-disk');
-      // Явная перезапись из окна побеждает.
+      // An explicit overwrite from the window wins.
       expect(
           blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           'user-window');
