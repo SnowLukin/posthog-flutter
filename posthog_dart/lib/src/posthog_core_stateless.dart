@@ -428,32 +428,33 @@ abstract class PostHogCoreStateless {
 
   ///
 
-  Map<String, Object?>? _props;
-
+  // No in-core memoization: storage already caches in memory, and a second
+  // cache layer would not learn about storage-level recovery merges - a {}
+  // memoized during a degraded window would silently shadow (and on the
+  // next register() overwrite) the recovered on-disk props.
   @protected
   Map<String, Object?> get props {
-    _props ??= getPersistedProperty<Map<String, Object?>>(
+    return getPersistedProperty<Map<String, Object?>>(
             PostHogPersistedProperty.props) ??
         {};
-    return _props ?? {};
   }
 
   @protected
   set props(Map<String, Object?>? val) {
-    _props = val;
+    setPersistedProperty(PostHogPersistedProperty.props, val);
   }
 
   void register(Map<String, Object?> properties) {
     wrap(() {
-      _props = {...props, ...properties};
-      setPersistedProperty(PostHogPersistedProperty.props, _props);
+      setPersistedProperty(
+          PostHogPersistedProperty.props, {...props, ...properties});
     });
   }
 
   void unregister(String property) {
     wrap(() {
-      props.remove(property);
-      setPersistedProperty(PostHogPersistedProperty.props, props);
+      final updated = {...props}..remove(property);
+      setPersistedProperty(PostHogPersistedProperty.props, updated);
     });
   }
 
@@ -610,15 +611,15 @@ abstract class PostHogCoreStateless {
 
         // Drop sent items from queue on non-network errors (e.g. 400)
         if (e is! PostHogFetchNetworkError) {
-          _removeFromFrontOfQueue(batchItems.length);
+          _removeBatchFromQueue(batchItems);
         }
         // On network errors, leave items in queue for next flush attempt
         events.emit('error', e);
         rethrow;
       }
 
-      // Successfully sent — remove from front of queue
-      _removeFromFrontOfQueue(batchItems.length);
+      // Successfully sent — remove the batch from the queue
+      _removeBatchFromQueue(batchItems);
       sentMessages.addAll(batchMessages);
     }
 
@@ -627,14 +628,37 @@ abstract class PostHogCoreStateless {
     }
   }
 
-  /// Removes [count] items from the front of the persisted queue.
-  void _removeFromFrontOfQueue(int count) {
+  /// Removes the sent [batchItems] from the persisted queue, matching by
+  /// message uuid: between the snapshot and this call the queue head may
+  /// have shifted (overflow drop, storage recovery prepending a backlog),
+  /// so positional removal could drop unsent events and resend sent ones.
+  void _removeBatchFromQueue(List<Object?> batchItems) {
+    Object? uuidOf(Object? item) {
+      if (item is! Map) return null;
+      final message = item['message'];
+      return message is Map ? message['uuid'] : null;
+    }
+
     final queue = List<Object?>.from(
         getPersistedProperty<List<Object?>>(PostHogPersistedProperty.queue) ??
             []);
-    final removeCount = count.clamp(0, queue.length);
-    setPersistedProperty(
-        PostHogPersistedProperty.queue, queue.sublist(removeCount));
+    final sent = batchItems.map(uuidOf).whereType<Object>().toSet();
+    final remaining = sent.isEmpty
+        ? queue
+        : queue.where((item) {
+            final uuid = uuidOf(item);
+            return uuid == null || !sent.contains(uuid);
+          }).toList();
+
+    if (remaining.length == queue.length && queue.isNotEmpty) {
+      // Nothing matched by identity (foreign queue shape): fall back to
+      // positional removal so the flush loop keeps making progress.
+      final removeCount = batchItems.length.clamp(0, queue.length);
+      setPersistedProperty(
+          PostHogPersistedProperty.queue, queue.sublist(removeCount));
+      return;
+    }
+    setPersistedProperty(PostHogPersistedProperty.queue, remaining);
   }
 
   Map<String, String> _getCustomHeaders() {
