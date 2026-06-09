@@ -573,25 +573,49 @@ abstract class PostHogCore extends PostHogCoreStateless {
     });
   }
 
+  // Persisted flag records parse inside _discardingMalformed: the store on
+  // disk is shared (other apps/SDK versions write the same file), and a
+  // valid-JSON-but-unexpected shape must not turn every capture()/flag read
+  // into a throw - the corrupted key is dropped instead.
+  T? _discardingMalformed<T>(
+      PostHogPersistedProperty key, T? Function() parse) {
+    try {
+      return parse();
+    } catch (e) {
+      logger.error('Discarding malformed persisted value for ${key.key}:', e);
+      setPersistedProperty(key, null);
+      return null;
+    }
+  }
+
   PostHogFlagsResponse? _getKnownFeatureFlagDetails() {
-    final storedRaw = getPersistedProperty<Map<String, Object?>>(
-        PostHogPersistedProperty.featureFlagDetails);
-    if (storedRaw == null) return null;
-    return parseFlagsResponse(storedRaw);
+    return _discardingMalformed(PostHogPersistedProperty.featureFlagDetails,
+        () {
+      final storedRaw = getPersistedProperty<Map<String, Object?>>(
+          PostHogPersistedProperty.featureFlagDetails);
+      if (storedRaw == null) return null;
+      return parseFlagsResponse(storedRaw);
+    });
   }
 
   PostHogFlagsStorageFormat? _getStoredFlagDetails() {
-    final raw = getPersistedProperty<Map<String, Object?>>(
-        PostHogPersistedProperty.featureFlagDetails);
-    if (raw == null) return null;
-    return PostHogFlagsStorageFormat.fromJson(raw);
+    return _discardingMalformed(PostHogPersistedProperty.featureFlagDetails,
+        () {
+      final raw = getPersistedProperty<Map<String, Object?>>(
+          PostHogPersistedProperty.featureFlagDetails);
+      if (raw == null) return null;
+      return PostHogFlagsStorageFormat.fromJson(raw);
+    });
   }
 
   PostHogFlagsResponse? _getBootstrappedFeatureFlagDetails() {
-    final raw = getPersistedProperty<Map<String, Object?>>(
-        PostHogPersistedProperty.bootstrapFeatureFlagDetails);
-    if (raw == null) return null;
-    return parseFlagsResponse(raw);
+    return _discardingMalformed(
+        PostHogPersistedProperty.bootstrapFeatureFlagDetails, () {
+      final raw = getPersistedProperty<Map<String, Object?>>(
+          PostHogPersistedProperty.bootstrapFeatureFlagDetails);
+      if (raw == null) return null;
+      return parseFlagsResponse(raw);
+    });
   }
 
   void _setBootstrappedFeatureFlagDetails(PostHogFlagsResponse details) {
@@ -724,29 +748,33 @@ abstract class PostHogCore extends PostHogCoreStateless {
   PostHogFlagsResponse? getFeatureFlagDetails() {
     if (!isInitialized) return null;
     var details = _getKnownFeatureFlagDetails();
-    final overriddenFlags = getPersistedProperty<Map<String, Object?>>(
-        PostHogPersistedProperty.overrideFeatureFlags);
+    final merged =
+        _discardingMalformed(PostHogPersistedProperty.overrideFeatureFlags,
+            () {
+      final overriddenFlags = getPersistedProperty<Map<String, Object?>>(
+          PostHogPersistedProperty.overrideFeatureFlags);
+      if (overriddenFlags == null) return null;
 
-    if (overriddenFlags == null) return details;
+      final defaultFlags = <String, FeatureFlagDetail>{};
+      final currentFlags = details?.flags ?? {};
+      defaultFlags.addAll(currentFlags);
 
-    final defaultFlags = <String, FeatureFlagDetail>{};
-    final currentFlags = details?.flags ?? {};
-    defaultFlags.addAll(currentFlags);
-
-    for (final entry in overriddenFlags.entries) {
-      if (entry.value == false || entry.value == null) {
-        defaultFlags.remove(entry.key);
-      } else {
-        defaultFlags[entry.key] = updateFlagValue(
-            defaultFlags[entry.key], entry.value as FeatureFlagValue);
+      for (final entry in overriddenFlags.entries) {
+        if (entry.value == false || entry.value == null) {
+          defaultFlags.remove(entry.key);
+        } else {
+          defaultFlags[entry.key] = updateFlagValue(
+              defaultFlags[entry.key], entry.value as FeatureFlagValue);
+        }
       }
-    }
 
-    return PostHogFlagsResponse(
-      flags: defaultFlags,
-      requestId: details?.requestId,
-      evaluatedAt: details?.evaluatedAt,
-    );
+      return PostHogFlagsResponse(
+        flags: defaultFlags,
+        requestId: details?.requestId,
+        evaluatedAt: details?.evaluatedAt,
+      );
+    });
+    return merged ?? details;
   }
 
   /// Checks if a feature flag is enabled.

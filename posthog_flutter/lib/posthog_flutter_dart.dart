@@ -15,6 +15,10 @@ import 'src/utils/property_normalizer.dart';
 /// На этих платформах нет нативного PostHog SDK, поэтому весь интерфейс
 /// делегируется в [pd.PostHog]. Типы posthog_flutter мостятся на типы
 /// posthog_dart на границе методов.
+///
+/// Каждый метод обёрнут в guard-границу: аналитика никогда не кидает в код
+/// приложения - паритет с нативными реализациями, где исключения method
+/// channel гасятся в каждом методе.
 class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
   pd.PostHog? _client;
 
@@ -30,66 +34,88 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     PosthogFlutterPlatformInterface.instance = PosthogFlutterDart();
   }
 
-  @override
-  Future<void> setup(PostHogConfig config) async {
-    _optedOut = config.optOut;
-
-    final client = pd.PostHog(
-      config.projectToken,
-      options: pd.PostHogConfig(
-        host: config.host,
-        flushAt: config.flushAt,
-        flushInterval: config.flushInterval,
-        maxBatchSize: config.maxBatchSize,
-        maxQueueSize: config.maxQueueSize,
-        debug: config.debug,
-        optOut: config.optOut,
-        sendFeatureFlagEvents: config.sendFeatureFlagEvents,
-        preloadFeatureFlags: config.preloadFeatureFlags,
-        personProfiles: _mapPersonProfiles(config.personProfiles),
-        beforeSend: _bridgeBeforeSend(config.beforeSend),
-      ),
-      storage: pd.FileStorage(_resolveStorageDir()),
-    );
-    _client = client;
-
-    if (config.onFeatureFlags != null) {
-      _featureFlagsUnsubscribe =
-          client.onFeatureFlags((_) => config.onFeatureFlags?.call());
-    }
-
-    // posthog_dart не грузит флаги на старте сам, поэтому honor preloadFeatureFlags
-    // вручную - иначе флаги пустые до первого identify/reload (как на нативе).
-    // Через собственный guarded-метод: голый reloadFeatureFlagsAsync() кидает,
-    // и его rejected future из setup-пути никем не обработан.
-    if (config.preloadFeatureFlags) {
-      // ignore: unawaited_futures
-      reloadFeatureFlags();
+  Future<void> _guard(String op, FutureOr<void> Function() fn) async {
+    try {
+      await fn();
+    } catch (e) {
+      printIfDebug('[PostHog] Exception on $op: $e');
     }
   }
+
+  Future<T> _guardWith<T>(
+      String op, T fallback, FutureOr<T> Function() fn) async {
+    try {
+      return await fn();
+    } catch (e) {
+      printIfDebug('[PostHog] Exception on $op: $e');
+      return fallback;
+    }
+  }
+
+  @override
+  Future<void> setup(PostHogConfig config) => _guard('setup', () {
+        _optedOut = config.optOut;
+
+        final client = pd.PostHog(
+          config.projectToken,
+          options: pd.PostHogConfig(
+            host: config.host,
+            flushAt: config.flushAt,
+            flushInterval: config.flushInterval,
+            maxBatchSize: config.maxBatchSize,
+            maxQueueSize: config.maxQueueSize,
+            debug: config.debug,
+            optOut: config.optOut,
+            sendFeatureFlagEvents: config.sendFeatureFlagEvents,
+            preloadFeatureFlags: config.preloadFeatureFlags,
+            personProfiles: _mapPersonProfiles(config.personProfiles),
+            beforeSend: _bridgeBeforeSend(config.beforeSend),
+          ),
+          storage: pd.FileStorage(_resolveStorageDir()),
+        );
+        _client = client;
+
+        if (config.onFeatureFlags != null) {
+          _featureFlagsUnsubscribe =
+              client.onFeatureFlags((_) => config.onFeatureFlags?.call());
+        }
+
+        // posthog_dart не грузит флаги на старте сам, поэтому honor
+        // preloadFeatureFlags вручную - иначе флаги пустые до первого
+        // identify/reload (как на нативе). Через собственный guarded-метод:
+        // голый reloadFeatureFlagsAsync() кидает, и его rejected future из
+        // setup-пути никем не обработан.
+        if (config.preloadFeatureFlags) {
+          // ignore: unawaited_futures
+          reloadFeatureFlags();
+        }
+      });
 
   @override
   Future<void> identify({
     required String userId,
     Map<String, Object>? userProperties,
     Map<String, Object>? userPropertiesSetOnce,
-  }) async {
-    _client?.identify(
-      userId,
-      properties: _mergeUserProps(null, userProperties, userPropertiesSetOnce),
-    );
-  }
+  }) =>
+      _guard('identify', () {
+        _client?.identify(
+          userId,
+          properties:
+              _mergeUserProps(null, userProperties, userPropertiesSetOnce),
+        );
+      });
 
   @override
   Future<void> setPersonProperties({
     Map<String, Object>? userPropertiesToSet,
     Map<String, Object>? userPropertiesToSetOnce,
-  }) async {
-    _client?.setPersonProperties(
-      userPropertiesToSet: _normalize(userPropertiesToSet),
-      userPropertiesToSetOnce: _normalize(userPropertiesToSetOnce),
-    );
-  }
+  }) =>
+      _guard('setPersonProperties', () {
+        _client?.setPersonProperties(
+          userPropertiesToSet: _normalize(userPropertiesToSet),
+          userPropertiesToSetOnce: _normalize(userPropertiesToSetOnce),
+        );
+      });
 
   @override
   Future<void> capture({
@@ -97,64 +123,62 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     Map<String, Object>? properties,
     Map<String, Object>? userProperties,
     Map<String, Object>? userPropertiesSetOnce,
-  }) async {
-    _client?.capture(
-      eventName,
-      properties: _mergeUserProps(
-        properties,
-        userProperties,
-        userPropertiesSetOnce,
-      ),
-    );
-  }
+  }) =>
+      _guard('capture', () {
+        _client?.capture(
+          eventName,
+          properties: _mergeUserProps(
+            properties,
+            userProperties,
+            userPropertiesSetOnce,
+          ),
+        );
+      });
 
   @override
   Future<void> screen({
     required String screenName,
     Map<String, Object>? properties,
-  }) async {
-    _client?.capture(
-      r'$screen',
-      properties: <String, Object?>{
-        r'$screen_name': screenName,
-        ...?_normalize(properties),
-      },
-    );
-  }
+  }) =>
+      _guard('screen', () {
+        _client?.capture(
+          r'$screen',
+          properties: <String, Object?>{
+            r'$screen_name': screenName,
+            ...?_normalize(properties),
+          },
+        );
+      });
 
   @override
-  Future<void> alias({required String alias}) async {
-    _client?.alias(alias);
-  }
+  Future<void> alias({required String alias}) =>
+      _guard('alias', () => _client?.alias(alias));
 
   @override
-  Future<String> getDistinctId() async {
-    return _client?.getDistinctId() ?? '';
-  }
+  Future<String> getDistinctId() =>
+      _guardWith('getDistinctId', '', () => _client?.getDistinctId() ?? '');
 
   @override
-  Future<void> reset() async {
-    _client?.reset();
-  }
+  Future<void> reset() => _guard('reset', () => _client?.reset());
 
   @override
-  Future<void> disable() async {
-    _optedOut = true;
-    _client?.optOut();
-  }
+  Future<void> disable() => _guard('disable', () {
+        _optedOut = true;
+        _client?.optOut();
+      });
 
   @override
-  Future<void> enable() async {
-    _optedOut = false;
-    _client?.optIn();
-  }
+  Future<void> enable() => _guard('enable', () {
+        _optedOut = false;
+        _client?.optIn();
+      });
 
   @override
-  Future<bool> isOptOut() async {
-    final client = _client;
-    if (client == null) return _optedOut;
-    return client.optedOut;
-  }
+  Future<bool> isOptOut() => _guardWith('isOptOut', _optedOut, () {
+        final client = _client;
+        if (client == null) return _optedOut;
+        return client.optedOut;
+      });
 
   @override
   Future<void> debug(bool enabled) async {
@@ -163,121 +187,109 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
   }
 
   @override
-  Future<void> register(String key, Object value) async {
-    _client?.register(PropertyNormalizer.normalize({key: value}));
-  }
+  Future<void> register(String key, Object value) => _guard('register',
+      () => _client?.register(PropertyNormalizer.normalize({key: value})));
 
   @override
-  Future<void> unregister(String key) async {
-    _client?.unregister(key);
-  }
+  Future<void> unregister(String key) =>
+      _guard('unregister', () => _client?.unregister(key));
 
   @override
-  Future<bool> isFeatureEnabled(String key) async {
-    return _client?.isFeatureEnabled(key) ?? false;
-  }
+  Future<bool> isFeatureEnabled(String key) => _guardWith(
+      'isFeatureEnabled', false, () => _client?.isFeatureEnabled(key) ?? false);
 
   @override
-  Future<void> reloadFeatureFlags() async {
-    try {
-      await _client?.reloadFeatureFlagsAsync();
-    } catch (e) {
-      printIfDebug('Exception on reloadFeatureFlags: $e');
-    }
-  }
+  Future<void> reloadFeatureFlags() => _guard(
+      'reloadFeatureFlags', () async => _client?.reloadFeatureFlagsAsync());
 
   @override
   Future<void> group({
     required String groupType,
     required String groupKey,
     Map<String, Object>? groupProperties,
-  }) async {
-    _client?.group(
-      groupType,
-      groupKey,
-      groupProperties: _normalize(groupProperties),
-    );
-  }
+  }) =>
+      _guard('group', () {
+        _client?.group(
+          groupType,
+          groupKey,
+          groupProperties: _normalize(groupProperties),
+        );
+      });
 
   @override
-  Future<Object?> getFeatureFlag({required String key}) async {
-    return _client?.getFeatureFlag(key);
-  }
+  Future<Object?> getFeatureFlag({required String key}) =>
+      _guardWith<Object?>(
+          'getFeatureFlag', null, () => _client?.getFeatureFlag(key));
 
   @override
-  Future<Object?> getFeatureFlagPayload({required String key}) async {
-    final result = _client?.getFeatureFlagResult(
-      key,
-      options: const pd.PostHogFeatureFlagResultOptions(sendEvent: false),
-    );
-    return result?.payload;
-  }
+  Future<Object?> getFeatureFlagPayload({required String key}) =>
+      _guardWith('getFeatureFlagPayload', null, () {
+        final result = _client?.getFeatureFlagResult(
+          key,
+          options: const pd.PostHogFeatureFlagResultOptions(sendEvent: false),
+        );
+        return result?.payload;
+      });
 
   @override
   Future<PostHogFeatureFlagResult?> getFeatureFlagResult({
     required String key,
     bool sendEvent = true,
-  }) async {
-    final result = _client?.getFeatureFlagResult(
-      key,
-      options: pd.PostHogFeatureFlagResultOptions(sendEvent: sendEvent),
-    );
-    if (result == null) return null;
-    return PostHogFeatureFlagResult(
-      key: key,
-      enabled: result.enabled,
-      variant: result.variant,
-      payload: result.payload,
-    );
-  }
+  }) =>
+      _guardWith('getFeatureFlagResult', null, () {
+        final result = _client?.getFeatureFlagResult(
+          key,
+          options: pd.PostHogFeatureFlagResultOptions(sendEvent: sendEvent),
+        );
+        if (result == null) return null;
+        return PostHogFeatureFlagResult(
+          key: key,
+          enabled: result.enabled,
+          variant: result.variant,
+          payload: result.payload,
+        );
+      });
 
   @override
-  Future<void> flush() async {
-    // Нативные реализации никогда не кидают из flush() — для VPN-приложения
-    // офлайн это штатное состояние, а не ошибка вызывающего кода.
-    try {
-      await _client?.flush();
-    } catch (e) {
-      printIfDebug('Exception on flush: $e');
-    }
-  }
+  Future<void> flush() =>
+      // Офлайн для VPN-приложения - штатное состояние, а не ошибка
+      // вызывающего кода.
+      _guard('flush', () async => _client?.flush());
 
   @override
   Future<void> captureException({
     required Object error,
     StackTrace? stackTrace,
     Map<String, Object>? properties,
-  }) async {
-    // Desktop не делает структурный разбор стектрейса (как нативный error
-    // tracking) — отправляем best-effort событие с тем, что есть.
-    _client?.capture(
-      r'$exception',
-      properties: <String, Object?>{
-        r'$exception_message': error.toString(),
-        if (stackTrace != null) r'$exception_stack_trace_raw': stackTrace.toString(),
-        ...?_normalize(properties),
-      },
-    );
-  }
+  }) =>
+      _guard('captureException', () {
+        // Desktop не делает структурный разбор стектрейса (как нативный error
+        // tracking) — отправляем best-effort событие с тем, что есть.
+        _client?.capture(
+          r'$exception',
+          properties: <String, Object?>{
+            r'$exception_message': error.toString(),
+            if (stackTrace != null)
+              r'$exception_stack_trace_raw': stackTrace.toString(),
+            ...?_normalize(properties),
+          },
+        );
+      });
 
   @override
-  Future<void> close() async {
-    _featureFlagsUnsubscribe?.call();
-    _featureFlagsUnsubscribe = null;
-    final client = _client;
-    _client = null;
-    try {
-      await client?.shutdown();
-    } catch (e) {
-      printIfDebug('Exception on close: $e');
-    }
-  }
+  Future<void> close() => _guard('close', () async {
+        _featureFlagsUnsubscribe?.call();
+        _featureFlagsUnsubscribe = null;
+        final client = _client;
+        _client = null;
+        await client?.shutdown();
+      });
 
   @override
-  Future<String?> getSessionId() async {
-    final id = _client?.getSessionId();
-    return (id == null || id.isEmpty) ? null : id;
-  }
+  Future<String?> getSessionId() => _guardWith('getSessionId', null, () {
+        final id = _client?.getSessionId();
+        return (id == null || id.isEmpty) ? null : id;
+      });
 
   @override
   Future<void> openUrl(String url) async {

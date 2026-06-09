@@ -57,5 +57,23 @@ void main() {
 
       expect(unhandled, isEmpty);
     });
+
+    test('malformed persisted flag details are discarded, not thrown', () {
+      final storage = InMemoryStorage();
+      // Valid JSON, unexpected shape - e.g. written by another SDK version
+      // sharing the same store.
+      storage.setProperty(PostHogPersistedProperty.featureFlagDetails,
+          <String, Object?>{'flags': 'garbage'});
+
+      final client = TestClient('k', options: testOptions(), storage: storage);
+
+      expect(() => client.capture('evt'), returnsNormally);
+      expect(getQueue(storage), hasLength(1));
+      expect(client.getFeatureFlag('missing'), isNull);
+      expect(
+          storage.getProperty<Map<String, Object?>>(
+              PostHogPersistedProperty.featureFlagDetails),
+          isNull);
+    });
   });
 }
