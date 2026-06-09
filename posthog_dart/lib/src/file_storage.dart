@@ -64,12 +64,25 @@ class FileStorage implements PostHogStorage {
   @override
   void setProperty<T>(PostHogPersistedProperty key, T? value) {
     final data = _readAll();
+    final hadKey = data.containsKey(key.key);
+    final previous = data[key.key];
     if (value == null) {
       data.remove(key.key);
     } else {
       data[key.key] = value;
     }
-    _writeAll();
+    try {
+      _writeAll();
+    } catch (_) {
+      // Storage must never throw into the host app (the read path already
+      // swallows errors). Roll back the cache so one non-encodable value or
+      // transient IO failure can't poison every subsequent write.
+      if (hadKey) {
+        data[key.key] = previous;
+      } else {
+        data.remove(key.key);
+      }
+    }
   }
 
   /// Clears the in-memory cache, forcing next read from disk.

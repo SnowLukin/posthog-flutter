@@ -675,11 +675,18 @@ abstract class PostHogCoreStateless {
       {Duration timeout = const Duration(seconds: 30)}) async {
     _clearFlushTimer();
 
-    await flush().timeout(
-      timeout,
-      onTimeout: () {
-        logger.error('Timed out while shutting down PostHog');
-      },
-    );
+    try {
+      await flush().timeout(
+        timeout,
+        onTimeout: () {
+          logger.error('Timed out while shutting down PostHog');
+        },
+      );
+    } catch (e) {
+      // Best-effort: pending events stay in the queue for the next run, and
+      // shutdown must complete so callers still release their resources
+      // (e.g. the HTTP client).
+      logger.error('Failed to flush while shutting down PostHog', e);
+    }
   }
 }

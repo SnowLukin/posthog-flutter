@@ -7,6 +7,7 @@ import 'src/feature_flag_result.dart';
 import 'src/posthog_config.dart';
 import 'src/posthog_event.dart';
 import 'src/posthog_flutter_platform_interface.dart';
+import 'src/util/logging.dart';
 
 /// Реализация плагина под desktop (Windows/Linux) поверх pure-Dart posthog_dart.
 ///
@@ -180,7 +181,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
 
   @override
   Future<void> reloadFeatureFlags() async {
-    await _client?.reloadFeatureFlagsAsync();
+    try {
+      await _client?.reloadFeatureFlagsAsync();
+    } catch (e) {
+      printIfDebug('Exception on reloadFeatureFlags: $e');
+    }
   }
 
   @override
@@ -230,7 +235,13 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
 
   @override
   Future<void> flush() async {
-    await _client?.flush();
+    // Нативные реализации никогда не кидают из flush() — для VPN-приложения
+    // офлайн это штатное состояние, а не ошибка вызывающего кода.
+    try {
+      await _client?.flush();
+    } catch (e) {
+      printIfDebug('Exception on flush: $e');
+    }
   }
 
   @override
@@ -257,7 +268,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     _featureFlagsUnsubscribe = null;
     final client = _client;
     _client = null;
-    await client?.shutdown();
+    try {
+      await client?.shutdown();
+    } catch (e) {
+      printIfDebug('Exception on close: $e');
+    }
   }
 
   @override
