@@ -32,8 +32,12 @@ class PostHogFetchNetworkError implements Exception {
   String toString() => 'PostHogFetchNetworkError: $cause';
 }
 
-bool _isPostHogFetchError(Object err) =>
-    err is PostHogFetchHttpError || err is PostHogFetchNetworkError;
+/// Network failures and transient HTTP statuses are worth retrying;
+/// hard 4xx (invalid token, bad payload) will fail the same way again.
+bool _isTransientFetchError(Object err) =>
+    err is PostHogFetchNetworkError ||
+    (err is PostHogFetchHttpError &&
+        (err.status >= 500 || err.status == 429 || err.status == 408));
 
 /// Base stateless PostHog client with queue management and HTTP operations.
 ///
@@ -503,10 +507,12 @@ abstract class PostHogCoreStateless {
       _flushBackground();
     }
 
+    _scheduleFlush();
+  }
+
+  void _scheduleFlush() {
     if (_flushInterval > Duration.zero && _flushTimer == null) {
-      _flushTimer = Timer(_flushInterval, () {
-        _flushBackground();
-      });
+      _flushTimer = Timer(_flushInterval, _flushBackground);
     }
   }
 
@@ -604,11 +610,14 @@ abstract class PostHogCoreStateless {
           continue; // retry with smaller batch
         }
 
-        // Drop sent items from queue on non-network errors (e.g. 400)
-        if (e is! PostHogFetchNetworkError) {
+        // Keep the batch queued on transient failures (network, 5xx, 429,
+        // 408); drop it only on hard 4xx that would fail again.
+        if (!_isTransientFetchError(e)) {
           _removeBatchFromQueue(batchItems);
         }
-        // On network errors, leave items in queue for next flush attempt
+        // Re-arm the periodic flush: otherwise queued events sit until the
+        // next capture (forever in an idle app after an offline failure).
+        _scheduleFlush();
         events.emit('error', e);
         rethrow;
       }
@@ -690,7 +699,7 @@ abstract class PostHogCoreStateless {
       },
       retryCount: retryCount ?? _fetchRetryCount,
       retryDelay: _fetchRetryDelay,
-      retryCheck: _isPostHogFetchError,
+      retryCheck: _isTransientFetchError,
     );
   }
 

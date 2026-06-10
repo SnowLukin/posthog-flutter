@@ -41,13 +41,16 @@ class TestClient extends PostHogCore {
 PostHogConfig testOptions({
   bool optOut = false,
   List<BeforeSendCallback>? beforeSend,
+  int fetchRetryCount = 0,
+  Duration flushInterval = const Duration(seconds: 30),
 }) =>
     PostHogConfig(
       host: 'https://us.i.posthog.com',
       flushAt: 100,
+      flushInterval: flushInterval,
       preloadFeatureFlags: false,
       optOut: optOut,
       beforeSend: beforeSend,
-      fetchRetryCount: 0,
+      fetchRetryCount: fetchRetryCount,
       fetchRetryDelay: Duration.zero,
     );

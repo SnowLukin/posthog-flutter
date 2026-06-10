@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:posthog_dart/posthog_dart.dart';
 import 'package:posthog_dart/src/http.dart';
+import 'package:posthog_dart/src/posthog_core_stateless.dart';
 import 'package:test/test.dart';
 
 import 'test_client.dart';
@@ -35,6 +38,59 @@ void main() {
       expect(batchEvents, hasLength(2));
       expect(batchEvents[0], contains('first'));
       expect(batchEvents[1], contains('second'));
+      expect(getQueue(storage), isEmpty);
+    });
+
+    test('transient 500 is retried and keeps the batch queued', () async {
+      final storage = InMemoryStorage();
+      final client = TestClient('k',
+          options: testOptions(fetchRetryCount: 1), storage: storage);
+      client.fetchHandler = (url, options) =>
+          const PostHogFetchResponse(status: 500, body: 'oops');
+
+      client.capture('evt');
+      await expectLater(
+          client.flush(), throwsA(isA<PostHogFetchHttpError>()));
+
+      expect(client.fetchCalls, hasLength(2));
+      expect(getQueue(storage), hasLength(1));
+    });
+
+    test('hard 400 is not retried and drops the batch', () async {
+      final storage = InMemoryStorage();
+      final client = TestClient('k',
+          options: testOptions(fetchRetryCount: 2), storage: storage);
+      client.fetchHandler = (url, options) =>
+          const PostHogFetchResponse(status: 400, body: 'bad');
+
+      client.capture('evt');
+      await expectLater(
+          client.flush(), throwsA(isA<PostHogFetchHttpError>()));
+
+      expect(client.fetchCalls, hasLength(1));
+      expect(getQueue(storage), isEmpty);
+    });
+
+    test('failed flush re-arms the periodic timer', () async {
+      final storage = InMemoryStorage();
+      final client = TestClient('k',
+          options:
+              testOptions(flushInterval: const Duration(milliseconds: 50)),
+          storage: storage);
+      var failures = 0;
+      client.fetchHandler = (url, options) {
+        if (failures < 1) {
+          failures++;
+          throw PostHogFetchNetworkError(const SocketException('offline'));
+        }
+        return const PostHogFetchResponse(
+            status: 200, body: '{"status": "ok"}');
+      };
+
+      client.capture('evt');
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      expect(failures, 1);
       expect(getQueue(storage), isEmpty);
     });
   });
