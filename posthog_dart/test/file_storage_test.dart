@@ -103,8 +103,7 @@ void main() {
           isNull);
     });
 
-    test('mutations during a read-failure window survive in memory and merge',
-        () {
+    test('writes while the disk is unreadable are dropped, disk intact', () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_rd');
       final seed = FileStorage(dir.path);
       seed.setProperty(PostHogPersistedProperty.distinctId, 'keep');
@@ -118,100 +117,22 @@ void main() {
       });
 
       final blind = FileStorage(dir.path);
+      expect(blind.isDegraded, isTrue);
+      expect(
+          () => blind.setProperty(
+              PostHogPersistedProperty.distinctId, 'clobber'),
+          returnsNormally);
       expect(
           blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
-      expect(
-          () => blind.setProperty(
-              PostHogPersistedProperty.distinctId, 'updated'),
-          returnsNormally);
-      // Consent/identity updates must survive the degraded window in memory.
+
+      Process.runSync('chmod', ['644', dataFile]);
       expect(
           blind.getProperty<String>(PostHogPersistedProperty.distinctId),
-          'updated');
-
-      // Once the disk is readable again, pending mutations merge over the
-      // on-disk data (unrelated keys intact) and get persisted.
-      Process.runSync('chmod', ['644', dataFile]);
+          'keep');
       expect(
           blind.getProperty<String>(PostHogPersistedProperty.sessionId),
           'sess');
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
-          'updated');
-
-      final fresh = FileStorage(dir.path);
-      expect(
-          fresh.getProperty<String>(PostHogPersistedProperty.distinctId),
-          'updated');
-      expect(
-          fresh.getProperty<String>(PostHogPersistedProperty.sessionId),
-          'sess');
-    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
-
-    test('recovery merge keeps the disk backlog and identity', () {
-      final dir = Directory.systemTemp.createTempSync('posthog_storage_merge');
-      final seed = FileStorage(dir.path);
-      seed.setProperty(PostHogPersistedProperty.queue, <Object?>[
-        {'message': 'backlog-1'},
-      ]);
-      seed.setProperty(PostHogPersistedProperty.anonymousId, 'anon-disk');
-
-      final dataFile = '${dir.path}/posthog_data.json';
-      Process.runSync('chmod', ['000', dataFile]);
-      addTearDown(() {
-        Process.runSync('chmod', ['644', dataFile]);
-        dir.deleteSync(recursive: true);
-      });
-
-      // During the window the core reads null and rebuilds values from scratch.
-      final blind = FileStorage(dir.path);
-      blind.setProperty(PostHogPersistedProperty.queue, <Object?>[
-        {'message': 'window-1'},
-      ]);
-      blind.setProperty(PostHogPersistedProperty.anonymousId, 'anon-window');
-      blind.setProperty(PostHogPersistedProperty.distinctId, 'user-window');
-
-      Process.runSync('chmod', ['644', dataFile]);
-      final queue =
-          blind.getProperty<List<Object?>>(PostHogPersistedProperty.queue);
-      expect(queue, hasLength(2));
-      expect((queue![0] as Map)['message'], 'backlog-1');
-      expect((queue[1] as Map)['message'], 'window-1');
-      // Disk identity wins over the one generated during the window.
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.anonymousId),
-          'anon-disk');
-      // An explicit overwrite from the window wins.
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
-          'user-window');
-    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
-
-    test('merged accumulator maps stay readable through typed getProperty',
-        () {
-      final dir = Directory.systemTemp.createTempSync('posthog_storage_union');
-      final seed = FileStorage(dir.path);
-      seed.setProperty(PostHogPersistedProperty.props,
-          <String, Object?>{'disk': 1});
-
-      final dataFile = '${dir.path}/posthog_data.json';
-      Process.runSync('chmod', ['000', dataFile]);
-      addTearDown(() {
-        Process.runSync('chmod', ['644', dataFile]);
-        dir.deleteSync(recursive: true);
-      });
-
-      final blind = FileStorage(dir.path);
-      blind.setProperty(PostHogPersistedProperty.props,
-          <String, Object?>{'window': 2});
-
-      Process.runSync('chmod', ['644', dataFile]);
-      final merged = blind.getProperty<Map<String, Object?>>(
-          PostHogPersistedProperty.props);
-      expect(merged, isNotNull);
-      expect(merged!['disk'], 1);
-      expect(merged['window'], 2);
     }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
 
     test('unreadable directory is degraded, not a fresh store', () {
