@@ -13,7 +13,7 @@ void main() {
       client.capture('first');
       expect(getQueue(storage), hasLength(1));
 
-      // Очередь мутирует, пока батч в полёте: capture во время await POST.
+      // The queue mutates while a batch is in flight.
       var enqueuedDuringFlight = false;
       client.fetchHandler = (url, options) async {
         if (!enqueuedDuringFlight) {
@@ -26,9 +26,8 @@ void main() {
 
       await client.flush();
 
-      // 'first' удалён по uuid, 'second' (встал в очередь во время полёта
-      // первого батча) отправлен следующей итерацией - ничего не потеряно
-      // и не задублировано.
+      // 'first' is removed by uuid, 'second' goes out on the next
+      // iteration - nothing lost, nothing duplicated.
       final batchEvents = client.fetchCalls
           .where((c) => c.url.contains('/batch'))
           .map((c) => c.options.body)
@@ -48,8 +47,7 @@ void main() {
       client.register({'a': 1});
       client.capture('warmup');
 
-      // Внешняя запись в стор (storage-recovery merge, другой слой) должна
-      // быть видна core без рестарта.
+      // An external write to the store must be visible without a restart.
       storage.setProperty(PostHogPersistedProperty.props,
           <String, Object?>{'a': 1, 'external': true});
       client.capture('evt');

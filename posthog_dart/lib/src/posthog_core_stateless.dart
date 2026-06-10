@@ -109,9 +109,7 @@ abstract class PostHogCoreStateless {
         _featureFlagsRequestTimeout = options.featureFlagsRequestTimeout,
         _remoteConfigRequestTimeout = options.remoteConfigRequestTimeout,
         _disableGeoip = options.disableGeoip,
-        // optOut maps to the persisted opted-out state (via _defaultOptIn),
-        // not to the hard `disabled` switch — otherwise optIn() could never
-        // re-enable a client constructed with optOut: true.
+        // optOut maps to the persisted opted-out state so optIn() can undo it.
         disabled = false,
         _evaluationContexts = options.evaluationContexts {
     assertNotEmpty(apiKey, "You must pass your PostHog project's api key.");
@@ -165,8 +163,7 @@ abstract class PostHogCoreStateless {
     final stored =
         getPersistedProperty<bool>(PostHogPersistedProperty.optedOut);
     if (stored != null) return stored;
-    // While the store is unreadable the consent state is unknown: fail
-    // closed - a user who may have opted out must not be tracked.
+    // Unknown consent while the store is unreadable: fail closed.
     if (storage.isDegraded) return true;
     return !_defaultOptIn;
   }
@@ -428,10 +425,8 @@ abstract class PostHogCoreStateless {
 
   ///
 
-  // No in-core memoization: storage already caches in memory, and a second
-  // cache layer would not learn about storage-level recovery merges - a {}
-  // memoized during a degraded window would silently shadow (and on the
-  // next register() overwrite) the recovered on-disk props.
+  // No memoization: storage already caches in memory, and a second cache
+  // layer would go stale when the store changes underneath.
   @protected
   Map<String, Object?> get props {
     return getPersistedProperty<Map<String, Object?>>(
@@ -628,10 +623,9 @@ abstract class PostHogCoreStateless {
     }
   }
 
-  /// Removes the sent [batchItems] from the persisted queue, matching by
-  /// message uuid: between the snapshot and this call the queue head may
-  /// have shifted (overflow drop, storage recovery prepending a backlog),
-  /// so positional removal could drop unsent events and resend sent ones.
+  /// Removes the sent [batchItems] from the persisted queue by message uuid:
+  /// the head may shift while a batch is in flight (overflow drop), so
+  /// positional removal could drop unsent events and resend sent ones.
   void _removeBatchFromQueue(List<Object?> batchItems) {
     Object? uuidOf(Object? item) {
       if (item is! Map) return null;
@@ -713,9 +707,7 @@ abstract class PostHogCoreStateless {
         },
       );
     } catch (e) {
-      // Best-effort: pending events stay in the queue for the next run, and
-      // shutdown must complete so callers still release their resources
-      // (e.g. the HTTP client).
+      // Best-effort: events stay queued and callers still release resources.
       logger.error('Failed to flush while shutting down PostHog', e);
     }
   }

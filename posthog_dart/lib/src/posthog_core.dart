@@ -124,8 +124,7 @@ abstract class PostHogCore extends PostHogCoreStateless {
     wrap(() {
       final allKeep = [
         PostHogPersistedProperty.queue,
-        // Consent is not identity state: reset() on logout must not silently
-        // re-enable tracking for a user who explicitly opted out.
+        // Consent must survive identity resets.
         PostHogPersistedProperty.optedOut,
         ...(propertiesToKeep ?? []),
       ];
@@ -452,10 +451,8 @@ abstract class PostHogCore extends PostHogCoreStateless {
   Future<PostHogFlagsResponse?> _doFlagsAsync(
       _FlagsAsyncOptions options) async {
     final completer = Completer<PostHogFlagsResponse?>();
-    // The shared future usually has no listener (only a 3rd+ concurrent
-    // caller awaits it), so without ignore() completeError would surface as
-    // an unhandled async error even when the direct caller handled the
-    // rethrown exception.
+    // The shared future usually has no listener; without ignore() its
+    // completeError would surface as an unhandled async error.
     _flagsResponseFuture = completer.future..ignore();
 
     try {
@@ -573,9 +570,7 @@ abstract class PostHogCore extends PostHogCoreStateless {
     });
   }
 
-  // Persisted flag records parse inside _discardingMalformed: the store on
-  // disk is shared (other apps/SDK versions write the same file), and a
-  // valid-JSON-but-unexpected shape must not turn every capture()/flag read
+  // A persisted record of an unexpected shape must not turn every capture()
   // into a throw - the corrupted key is dropped instead.
   T? _discardingMalformed<T>(
       PostHogPersistedProperty key, T? Function() parse) {
@@ -945,10 +940,8 @@ abstract class PostHogCore extends PostHogCoreStateless {
 
     final props = (message['properties'] as Map<String, Object?>?) ?? {};
     final timestamp = message['timestamp'];
-    // Internal messages legitimately carry null values (e.g.
-    // $feature_flag_response for a missing flag) and $set/$set_once maps of
-    // looser runtime types, so the event copy is built defensively instead of
-    // with throwing casts.
+    // Internal messages carry null values and loosely typed $set maps, so
+    // the event copy is built defensively instead of with throwing casts.
     final event = PostHogEvent(
       uuid: message['uuid'] as String,
       event: message['event'] as String,
@@ -1002,9 +995,8 @@ abstract class PostHogCore extends PostHogCoreStateless {
       try {
         final fnResult = callbacks[i](result!);
         if (fnResult is Future<PostHogEvent?>) {
-          // Continue the chain from this point: re-running the whole list
-          // would execute earlier callbacks twice (duplicated side effects)
-          // while the abandoned first future keeps mutating the same event.
+          // Continue from this point: re-running the list would double the
+          // earlier callbacks' side effects.
           return _continueBeforeSendAsync(fnResult, result, i + 1, event.event);
         }
         result = fnResult;
