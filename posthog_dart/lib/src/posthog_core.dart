@@ -46,7 +46,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
   Future<PostHogFlagsResponse?>? _flagsResponseFuture;
   final Duration _sessionExpiration;
   static const Duration _sessionMaxLength = Duration(hours: 24);
-  Map<String, Object?> _sessionProps = {};
 
   _PendingFlagsRequest? _pendingFlagsRequest;
 
@@ -58,58 +57,15 @@ abstract class PostHogCore extends PostHogCoreStateless {
 
   PostHogCore(
     super.apiKey, {
-    PostHogConfig options = const PostHogConfig(),
+    super.options,
     super.storage,
   })  : _sendFeatureFlagEvents = options.sendFeatureFlagEvents,
         _sessionExpiration = options.sessionExpiration,
         _personProfiles = options.personProfiles,
-        _beforeSend = options.beforeSend,
-        super(options: options) {
-    _setupBootstrap(options);
-  }
-
-  void _setupBootstrap(PostHogConfig options) {
-    final bootstrap = options.bootstrap;
-    if (bootstrap == null) return;
-
-    if (bootstrap.distinctId != null) {
-      if (bootstrap.isIdentifiedId) {
-        final distinctId =
-            getPersistedProperty<String>(PostHogPersistedProperty.distinctId);
-        if (distinctId == null) {
-          setPersistedProperty(
-              PostHogPersistedProperty.distinctId, bootstrap.distinctId);
-          setPersistedProperty(
-              PostHogPersistedProperty.personMode, 'identified');
-        }
-      } else {
-        final anonymousId =
-            getPersistedProperty<String>(PostHogPersistedProperty.anonymousId);
-        if (anonymousId == null) {
-          setPersistedProperty(
-              PostHogPersistedProperty.anonymousId, bootstrap.distinctId);
-        }
-      }
-    }
-
-    final bootstrapFlags = bootstrap.flags;
-    if (bootstrapFlags != null && bootstrapFlags.isNotEmpty) {
-      final bootstrapResponse = PostHogFlagsResponse(flags: bootstrapFlags);
-      _setBootstrappedFeatureFlagDetails(bootstrapResponse);
-
-      final currentDetails = _getKnownFeatureFlagDetails();
-      final newFlags = <String, FeatureFlagDetail>{
-        ...bootstrapFlags,
-        ...(currentDetails?.flags ?? {}),
-      };
-
-      _setKnownFeatureFlagDetails(PostHogFlagsStorageFormat(flags: newFlags));
-    }
-  }
+        _beforeSend = options.beforeSend;
 
   void _clearProps() {
     props = null;
-    _sessionProps = {};
     _flagCallReported.clear();
   }
 
@@ -163,7 +119,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
   Map<String, Object?> _enrichProperties(Map<String, Object?>? properties) {
     return {
       ...props,
-      ..._sessionProps,
       ...(properties ?? {}),
       ...getCommonEventProperties(),
       r'$session_id': getSessionId(),
@@ -228,17 +183,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
         getAnonymousId();
   }
 
-  /// Register properties for the current session only.
-  void registerForSession(Map<String, Object?> properties) {
-    if (!isInitialized) return;
-    _sessionProps = {..._sessionProps, ...properties};
-  }
-
-  /// Unregister a session property.
-  void unregisterForSession(String property) {
-    if (!isInitialized) return;
-    _sessionProps.remove(property);
-  }
 
   /// Identifies a user with a distinct ID and optional properties.
   void identify(String? distinctId,
@@ -342,7 +286,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
   }
 
   /// Associates the current user with a group and optionally sets group properties.
-  ///
   /// If [groupProperties] is provided, a `$groupidentify` event is sent.
   void group(
     String groupType,
@@ -531,8 +474,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
           errorsWhileComputingFlags: res.errorsWhileComputingFlags,
           quotaLimited: res.quotaLimited,
         ));
-        setPersistedProperty(
-            PostHogPersistedProperty.flagsEndpointWasHit, true);
       }
 
       completer.complete(res);
@@ -603,30 +544,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
     });
   }
 
-  PostHogFlagsResponse? _getBootstrappedFeatureFlagDetails() {
-    return _discardingMalformed(
-        PostHogPersistedProperty.bootstrapFeatureFlagDetails, () {
-      final raw = getPersistedProperty<Map<String, Object?>>(
-          PostHogPersistedProperty.bootstrapFeatureFlagDetails);
-      if (raw == null) return null;
-      return parseFlagsResponse(raw);
-    });
-  }
-
-  void _setBootstrappedFeatureFlagDetails(PostHogFlagsResponse details) {
-    setPersistedProperty(PostHogPersistedProperty.bootstrapFeatureFlagDetails, {
-      'flags': details.flags.map((k, v) => MapEntry(k, v.toJson())),
-      if (details.requestId != null) 'requestId': details.requestId,
-    });
-  }
-
-  Map<String, FeatureFlagValue>? _getBootstrappedFeatureFlags() {
-    return _getBootstrappedFeatureFlagDetails()?.featureFlags;
-  }
-
-  Map<String, Object?>? _getBootstrappedFeatureFlagPayloads() {
-    return _getBootstrappedFeatureFlagDetails()?.featureFlagPayloads;
-  }
 
   /// Gets the result for a specific feature flag.
   PostHogFeatureFlagResult? getFeatureFlagResult(String key,
@@ -677,8 +594,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
         }
       }
 
-      final bootstrappedResponse = _getBootstrappedFeatureFlags()?[key];
-      final bootstrappedPayload = _getBootstrappedFeatureFlagPayloads()?[key];
       final featureFlagError = errors.isNotEmpty ? errors.join(',') : null;
 
       _flagCallReported[key] = true;
@@ -690,12 +605,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
         ...maybeAdd(r'$feature_flag_version', featureFlag?.metadata?.version),
         ...maybeAdd(r'$feature_flag_reason',
             featureFlag?.reason?.description ?? featureFlag?.reason?.code),
-        ...maybeAdd(
-            r'$feature_flag_bootstrapped_response', bootstrappedResponse),
-        ...maybeAdd(r'$feature_flag_bootstrapped_payload', bootstrappedPayload),
-        r'$used_bootstrap_value': !(getPersistedProperty<bool>(
-                PostHogPersistedProperty.flagsEndpointWasHit) ??
-            false),
         ...maybeAdd(r'$feature_flag_request_id', details?.requestId),
         ...maybeAdd(r'$feature_flag_evaluated_at', details?.evaluatedAt),
         ...maybeAdd(r'$feature_flag_error', featureFlagError),
@@ -739,37 +648,10 @@ abstract class PostHogCore extends PostHogCoreStateless {
     return getFeatureFlagDetails()?.featureFlags;
   }
 
-  /// Gets full feature flag details including overrides.
+  /// Gets full feature flag details.
   PostHogFlagsResponse? getFeatureFlagDetails() {
     if (!isInitialized) return null;
-    var details = _getKnownFeatureFlagDetails();
-    final merged =
-        _discardingMalformed(PostHogPersistedProperty.overrideFeatureFlags,
-            () {
-      final overriddenFlags = getPersistedProperty<Map<String, Object?>>(
-          PostHogPersistedProperty.overrideFeatureFlags);
-      if (overriddenFlags == null) return null;
-
-      final defaultFlags = <String, FeatureFlagDetail>{};
-      final currentFlags = details?.flags ?? {};
-      defaultFlags.addAll(currentFlags);
-
-      for (final entry in overriddenFlags.entries) {
-        if (entry.value == false || entry.value == null) {
-          defaultFlags.remove(entry.key);
-        } else {
-          defaultFlags[entry.key] = updateFlagValue(
-              defaultFlags[entry.key], entry.value as FeatureFlagValue);
-        }
-      }
-
-      return PostHogFlagsResponse(
-        flags: defaultFlags,
-        requestId: details?.requestId,
-        evaluatedAt: details?.evaluatedAt,
-      );
-    });
-    return merged ?? details;
+    return _getKnownFeatureFlagDetails();
   }
 
   /// Checks if a feature flag is enabled.
@@ -829,13 +711,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
     });
   }
 
-  /// Overrides feature flags locally.
-  void overrideFeatureFlag(Map<String, FeatureFlagValue>? flags) {
-    wrap(() {
-      setPersistedProperty(
-          PostHogPersistedProperty.overrideFeatureFlags, flags);
-    });
-  }
 
   bool _isIdentified() {
     final personMode =

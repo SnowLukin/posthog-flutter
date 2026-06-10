@@ -41,15 +41,3 @@ Object? parsePayload(Object? response) {
   }
 }
 
-/// Update a flag detail with a new value.
-FeatureFlagDetail updateFlagValue(
-    FeatureFlagDetail? flag, FeatureFlagValue value) {
-  return FeatureFlagDetail(
-    key: flag?.key ?? '',
-    enabled: value is String ? true : value as bool,
-    variant: value is String ? value : null,
-    reason: flag?.reason,
-    metadata: flag?.metadata,
-    failed: flag?.failed,
-  );
-}

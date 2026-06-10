@@ -14,7 +14,6 @@ export 'src/config.dart'
     show
         PostHogConfig,
         PostHogCaptureOptions,
-        BootstrapConfig,
         PostHogPersonProfiles,
         BeforeSendCallback,
         PostHogEvent;

@@ -56,9 +56,7 @@ abstract class PostHogCoreStateless {
   final Duration _flushInterval;
   final Duration _requestTimeout;
   final Duration _featureFlagsRequestTimeout;
-  final Duration _remoteConfigRequestTimeout;
   final bool _disableGeoip;
-  final List<String>? _evaluationContexts;
   @protected
   bool disabled;
 
@@ -111,11 +109,9 @@ abstract class PostHogCoreStateless {
         _fetchRetryDelay = options.fetchRetryDelay,
         _requestTimeout = options.requestTimeout,
         _featureFlagsRequestTimeout = options.featureFlagsRequestTimeout,
-        _remoteConfigRequestTimeout = options.remoteConfigRequestTimeout,
         _disableGeoip = options.disableGeoip,
         // optOut maps to the persisted opted-out state so optIn() can undo it.
-        disabled = false,
-        _evaluationContexts = options.evaluationContexts {
+        disabled = false {
     assertNotEmpty(apiKey, "You must pass your PostHog project's api key.");
     logger = PostHogLogger('[PostHog]', _logMsgIfDebug);
     isInitialized = true;
@@ -220,7 +216,6 @@ abstract class PostHogCoreStateless {
     };
   }
 
-  ///
 
   @protected
   void identifyStateless(
@@ -300,38 +295,7 @@ abstract class PostHogCoreStateless {
     });
   }
 
-  ///
 
-  @protected
-  Future<PostHogRemoteConfig?> getRemoteConfig() async {
-    var configHost = host;
-    if (configHost == 'https://us.i.posthog.com') {
-      configHost = 'https://us-assets.i.posthog.com';
-    } else if (configHost == 'https://eu.i.posthog.com') {
-      configHost = 'https://eu-assets.i.posthog.com';
-    }
-
-    final url = '$configHost/array/$apiKey/config';
-    try {
-      final response = await _fetchWithRetry(
-        url,
-        PostHogFetchOptions(
-          method: 'GET',
-          headers: {..._getCustomHeaders(), 'Content-Type': 'application/json'},
-        ),
-        retryCount: 0,
-        timeout: _remoteConfigRequestTimeout,
-      );
-      final json = jsonDecode(response.body) as Map<String, Object?>;
-      return PostHogRemoteConfig.fromJson(json);
-    } catch (e) {
-      logger.error('Remote config could not be loaded', e);
-      events.emit('error', e);
-      return null;
-    }
-  }
-
-  ///
 
   @protected
   Future<GetFlagsResult> getFlags(
@@ -353,10 +317,6 @@ abstract class PostHogCoreStateless {
       'group_properties': groupProperties,
       ...extraPayload,
     };
-
-    if (_evaluationContexts != null && _evaluationContexts.isNotEmpty) {
-      requestData['evaluation_contexts'] = _evaluationContexts;
-    }
 
     logger.info('Flags URL', url);
 
@@ -396,38 +356,7 @@ abstract class PostHogCoreStateless {
         type: FeatureFlagRequestErrorType.unknownError);
   }
 
-  @protected
-  Future<FeatureFlagValue?> getFeatureFlagStateless(
-    String key,
-    String distinctId, {
-    Map<String, String> groups = const {},
-    Map<String, String> personProperties = const {},
-    Map<String, Map<String, String>> groupProperties = const {},
-    bool? disableGeoip,
-  }) async {
-    final extraPayload = <String, Object?>{};
-    if (disableGeoip ?? _disableGeoip) {
-      extraPayload['geoip_disable'] = true;
-    }
-    extraPayload['flag_keys_to_evaluate'] = [key];
 
-    final result = await getFlags(
-      distinctId,
-      groups: groups,
-      personProperties: personProperties,
-      groupProperties: groupProperties,
-      extraPayload: extraPayload,
-    );
-
-    if (result is GetFlagsFailure) return null;
-
-    final response = (result as GetFlagsSuccess).response;
-    final flagDetail = response.flags[key];
-    var value = getFeatureFlagValue(flagDetail);
-    return value ?? false;
-  }
-
-  ///
 
   // No memoization: storage already caches in memory, and a second cache
   // layer would go stale when the store changes underneath.
@@ -457,7 +386,6 @@ abstract class PostHogCoreStateless {
     });
   }
 
-  ///
 
   /// Hook for subclasses to transform or filter a message before queueing.
   @protected
@@ -553,7 +481,6 @@ abstract class PostHogCoreStateless {
   }
 
   /// Flushes the queue of pending events.
-  ///
   /// If a flush is already in progress, returns the existing future to avoid
   /// concurrent flushes sending duplicate events.
   Future<void> flush() {

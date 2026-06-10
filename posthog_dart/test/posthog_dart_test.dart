@@ -190,13 +190,6 @@ void main() {
       expect(props['platform'], 'web');
     });
 
-    test('should register session properties', () {
-      posthog.registerForSession({'screen': 'home'});
-      posthog.capture('test_event');
-
-      expect(getProps(storage, 0)['screen'], 'home');
-    });
-
     test('should set person properties for flags', () {
       posthog
           .setPersonPropertiesForFlags({'role': 'admin'}, reloadFlags: false);
@@ -442,44 +435,4 @@ void main() {
     });
   });
 
-  group('Bootstrap', () {
-    test('should bootstrap with feature flags', () {
-      final storage = InMemoryStorage();
-      final client = TestPostHogClient(
-        'test-key',
-        options: const PostHogConfig(
-          preloadFeatureFlags: false,
-          bootstrap: BootstrapConfig(
-            flags: {
-              'flag1': FeatureFlagDetail(key: 'flag1', enabled: true),
-              'flag2': FeatureFlagDetail(
-                  key: 'flag2', enabled: true, variant: 'variant-a'),
-            },
-          ),
-        ),
-        storage: storage,
-      );
-
-      final details = client.getFeatureFlagDetails();
-      expect(details?.flags['flag1']?.enabled, true);
-      expect(details?.flags['flag2']?.variant, 'variant-a');
-    });
-
-    test('should bootstrap with distinct ID', () {
-      final storage = InMemoryStorage();
-      final client = TestPostHogClient(
-        'test-key',
-        options: const PostHogConfig(
-          preloadFeatureFlags: false,
-          bootstrap: BootstrapConfig(
-            distinctId: 'bootstrap-user',
-            isIdentifiedId: true,
-          ),
-        ),
-        storage: storage,
-      );
-
-      expect(client.getDistinctId(), 'bootstrap-user');
-    });
-  });
 }

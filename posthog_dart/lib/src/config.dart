@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'feature_flags.dart';
 import 'uuid.dart';
 
 /// Callback to intercept and modify events before they are sent to PostHog.
@@ -41,9 +40,6 @@ class PostHogConfig {
   /// Whether to load feature flags when initialized or not.
   final bool preloadFeatureFlags;
 
-  /// Option to bootstrap the library with given distinctId and feature flags.
-  final BootstrapConfig? bootstrap;
-
   /// How many times we will retry HTTP requests.
   final int fetchRetryCount;
 
@@ -59,10 +55,6 @@ class PostHogConfig {
   /// Defaults to 10 seconds.
   final Duration featureFlagsRequestTimeout;
 
-  /// Timeout for remote config calls.
-  /// Defaults to 3 seconds.
-  final Duration remoteConfigRequestTimeout;
-
   /// For Session Analysis how long before we expire a session.
   /// Defaults to 30 minutes.
   final Duration sessionExpiration;
@@ -70,9 +62,6 @@ class PostHogConfig {
   /// Whether to disable GeoIP.
   /// Defaults to false.
   final bool disableGeoip;
-
-  /// Evaluation contexts for feature flags.
-  final List<String>? evaluationContexts;
 
   /// Determines when to create Person Profiles for users.
   final PostHogPersonProfiles personProfiles;
@@ -90,15 +79,12 @@ class PostHogConfig {
     this.debug = false,
     this.sendFeatureFlagEvents = true,
     this.preloadFeatureFlags = true,
-    this.bootstrap,
     this.fetchRetryCount = 3,
     this.fetchRetryDelay = const Duration(seconds: 3),
     this.requestTimeout = const Duration(seconds: 10),
     this.featureFlagsRequestTimeout = const Duration(seconds: 10),
-    this.remoteConfigRequestTimeout = const Duration(seconds: 3),
     this.sessionExpiration = const Duration(minutes: 30),
     this.disableGeoip = false,
-    this.evaluationContexts,
     this.personProfiles = PostHogPersonProfiles.identifiedOnly,
     this.beforeSend,
   });
@@ -114,21 +100,6 @@ enum PostHogPersonProfiles {
 
   /// Never create person profiles.
   never,
-}
-
-/// Bootstrap configuration.
-class BootstrapConfig {
-  final String? distinctId;
-  final bool isIdentifiedId;
-
-  /// Bootstrap feature flags as a map of flag key to [FeatureFlagDetail].
-  final Map<String, FeatureFlagDetail>? flags;
-
-  const BootstrapConfig({
-    this.distinctId,
-    this.isIdentifiedId = false,
-    this.flags,
-  });
 }
 
 /// Capture options for individual events.
