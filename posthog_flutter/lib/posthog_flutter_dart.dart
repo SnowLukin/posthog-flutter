@@ -10,26 +10,21 @@ import 'src/posthog_flutter_platform_interface.dart';
 import 'src/util/logging.dart';
 import 'src/utils/property_normalizer.dart';
 
-/// Реализация плагина под desktop (Windows/Linux) поверх pure-Dart posthog_dart.
+/// Desktop (Windows/Linux) implementation on top of the pure-Dart
+/// posthog_dart package, bridging the plugin types at method boundaries.
 ///
-/// На этих платформах нет нативного PostHog SDK, поэтому весь интерфейс
-/// делегируется в [pd.PostHog]. Типы posthog_flutter мостятся на типы
-/// posthog_dart на границе методов.
-///
-/// Каждый метод обёрнут в guard-границу: аналитика никогда не кидает в код
-/// приложения - паритет с нативными реализациями, где исключения method
-/// channel гасятся в каждом методе.
+/// Every method is wrapped in a guard: analytics never throws into the host
+/// app, matching the native implementations where channel exceptions are
+/// swallowed per method.
 class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
   pd.PostHog? _client;
 
-  /// Хранится для случая, когда у pd нет init-флага: opt-out, выставленный после
-  /// setup, нужно где-то держать, чтобы [isOptOut] отвечал согласованно.
+  /// Keeps [isOptOut] consistent before/without a client.
   bool _optedOut = false;
 
-  /// Отписка от onFeatureFlags, чтобы при [close] не остался висящий listener.
   void Function()? _featureFlagsUnsubscribe;
 
-  /// Регистрирует реализацию как platform instance (dartPluginClass для desktop).
+  /// Registered as the platform instance via dartPluginClass on desktop.
   static void registerWith() {
     PosthogFlutterPlatformInterface.instance = PosthogFlutterDart();
   }
@@ -80,11 +75,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
               client.onFeatureFlags((_) => config.onFeatureFlags?.call());
         }
 
-        // posthog_dart не грузит флаги на старте сам, поэтому honor
-        // preloadFeatureFlags вручную - иначе флаги пустые до первого
-        // identify/reload (как на нативе). Через собственный guarded-метод:
-        // голый reloadFeatureFlagsAsync() кидает, и его rejected future из
-        // setup-пути никем не обработан.
+        // posthog_dart does not preload flags itself; the guarded reload is
+        // used because the raw client future rejects with nobody listening.
         if (config.preloadFeatureFlags) {
           // ignore: unawaited_futures
           reloadFeatureFlags();
@@ -181,10 +173,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       });
 
   @override
-  Future<void> debug(bool enabled) async {
-    // Режим debug фиксируется в конфиге при setup; рантайм-переключение
-    // намеренно no-op, чтобы поведение совпадало с нативными платформами.
-  }
+  Future<void> debug(bool enabled) =>
+      _guard('debug', () => _client?.debug(enabled));
 
   @override
   Future<void> register(String key, Object value) => _guard('register',
@@ -251,10 +241,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       });
 
   @override
-  Future<void> flush() =>
-      // Офлайн для VPN-приложения - штатное состояние, а не ошибка
-      // вызывающего кода.
-      _guard('flush', () async => _client?.flush());
+  Future<void> flush() => _guard('flush', () async => _client?.flush());
 
   @override
   Future<void> captureException({
@@ -263,8 +250,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     Map<String, Object>? properties,
   }) =>
       _guard('captureException', () {
-        // Desktop не делает структурный разбор стектрейса (как нативный error
-        // tracking) — отправляем best-effort событие с тем, что есть.
+        // No structured stack trace parsing on desktop - best effort.
         _client?.capture(
           r'$exception',
           properties: <String, Object?>{
@@ -293,22 +279,22 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
 
   @override
   Future<void> openUrl(String url) async {
-    // Открытие URL — задача surveys/native UI, на desktop не поддерживается.
+    // Surveys/native UI only - not supported on desktop.
   }
 
   @override
   Future<void> showSurvey(Map<String, dynamic> survey) async {
-    // Surveys на desktop не поддерживаются.
+    // Surveys are not supported on desktop.
   }
 
   @override
   Future<void> startSessionRecording({bool resumeCurrent = true}) async {
-    // Session replay на desktop не поддерживается.
+    // Session replay is not supported on desktop.
   }
 
   @override
   Future<void> stopSessionRecording() async {
-    // Session replay на desktop не поддерживается.
+    // Session replay is not supported on desktop.
   }
 
   @override
@@ -329,9 +315,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     return merged.isNotEmpty ? merged : null;
   }
 
-  /// На нативе properties проходят PropertyNormalizer перед method channel;
-  /// здесь та же нормализация защищает jsonEncode в FileStorage и /batch/ от
-  /// несериализуемых значений (DateTime, enum, произвольные объекты).
+  /// Same normalization the native path applies before the method channel;
+  /// here it protects jsonEncode in storage and /batch/ payloads.
   Map<String, Object>? _normalize(Map<String, Object>? properties) {
     if (properties == null || properties.isEmpty) return properties;
     return Map<String, Object>.from(PropertyNormalizer.normalize(properties));
@@ -348,12 +333,9 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     }
   }
 
-  /// Мостит beforeSend-колбэки posthog_flutter в формат posthog_dart.
-  ///
-  /// Типы [PostHogEvent] в двух пакетах разные, поэтому событие конвертируется
-  /// в flutter-форму, прогоняется через пользовательские колбэки и копируется
-  /// обратно в исходный pd-event (сохраняя uuid/timestamp, которых нет во
-  /// flutter-форме).
+  /// Bridges beforeSend callbacks: the event is converted to the flutter
+  /// shape, run through the user callbacks and copied back into the pd event
+  /// (preserving uuid/timestamp, absent from the flutter shape).
   List<pd.BeforeSendCallback>? _bridgeBeforeSend(
     List<BeforeSendCallback> callbacks,
   ) {
@@ -376,8 +358,7 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
             if (resolved == null) return null;
             flutterEvent = resolved;
           } catch (e) {
-            // Контракт PostHogConfig.beforeSend: упавший колбэк пропускается,
-            // цепочка продолжается с текущим событием (как на нативе).
+            // Contract: a throwing callback is skipped, the chain continues.
             printIfDebug('[PostHog] beforeSend callback threw exception: $e');
           }
         }
@@ -393,13 +374,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     ];
   }
 
-  /// Каталог для FileStorage без path_provider — на уровне библиотеки путь
-  /// резолвится из env. Windows: APPDATA (fallback LOCALAPPDATA);
-  /// Linux: XDG_DATA_HOME (fallback ~/.local/share). При неудаче — systemTemp.
+  /// Storage directory without path_provider: APPDATA (Windows),
+  /// XDG_DATA_HOME / ~/.local/share (Linux), systemTemp as a last resort.
   ///
-  /// Стор скоупится по project token: общий на всех каталог означал бы, что
-  /// разные приложения/проекты на этом плагине делят distinct_id, consent и
-  /// очередь (события одного проекта уезжали бы с api_key другого).
+  /// Scoped per project token - a shared directory would mix distinct_id,
+  /// consent and queued events between apps and projects.
   String _resolveStorageDir(String projectToken) {
     final env = Platform.environment;
     String? base;
@@ -420,10 +399,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     if (scope.isEmpty || scope == '.' || scope == '..') {
       scope = 'default';
     }
-    // Каталог не создаётся здесь: FileStorage сам делает createSync перед
-    // записью, а нечитаемость покрыта его degraded-механикой. Любой фоллбек
-    // обязан оставаться скоупленным - нескоупленный путь возвращает общий
-    // межпроектный стор.
+    // FileStorage creates the directory itself; every fallback must stay
+    // scoped or it reopens the shared cross-project store.
     final base0 = (base != null && base.isNotEmpty)
         ? base
         : Directory.systemTemp.path;
