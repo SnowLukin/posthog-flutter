@@ -23,6 +23,9 @@ dependencies:
   # Pure-Dart ядро для desktop (Windows/Linux), где нет нативного SDK.
   posthog_dart:
     path: ../posthog_dart
+  # App name/version/build for desktop context properties. The range spans
+  # two majors so host apps on either resolve.
+  package_info_plus: ">=9.0.0 <11.0.0"
 
 dev_dependencies:
   flutter_lints: ^5.0.0

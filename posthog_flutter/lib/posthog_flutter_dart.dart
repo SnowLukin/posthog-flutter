@@ -5,6 +5,7 @@ import 'package:posthog_dart/posthog_dart.dart' as pd;
 
 import 'src/feature_flag_result.dart';
 import 'src/posthog_config.dart';
+import 'src/posthog_desktop_context.dart';
 import 'src/posthog_event.dart';
 import 'src/posthog_flutter_platform_interface.dart';
 import 'src/util/logging.dart';
@@ -48,11 +49,17 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
   }
 
   @override
-  Future<void> setup(PostHogConfig config) => _guard('setup', () {
+  Future<void> setup(PostHogConfig config) => _guard('setup', () async {
         _optedOut = config.optOut;
 
-        final client = pd.PostHog(
+        // Collected before the client exists so no event captured through
+        // this instance goes out without device/app context; the await only
+        // reads local platform metadata, so setup stays fast.
+        final staticContext = await collectDesktopContext();
+
+        final client = DesktopPostHog(
           config.projectToken,
+          staticContext: staticContext,
           options: pd.PostHogConfig(
             host: config.host,
             flushAt: config.flushAt,
