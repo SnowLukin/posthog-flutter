@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:meta/meta.dart';
+
 import 'feature_flag_utils.dart';
 import 'posthog_core_stateless.dart';
 import 'types.dart';
@@ -116,8 +118,17 @@ abstract class PostHogCore extends PostHogCoreStateless {
     };
   }
 
+  /// Platform context (OS, app, device) attached to every event. Merged with
+  /// the lowest precedence so registered super properties and event-level
+  /// properties can override it, matching the native PostHog SDKs.
+  ///
+  /// Returns nothing by default; platform implementations override this.
+  @protected
+  Map<String, Object?> getContextProperties() => {};
+
   Map<String, Object?> _enrichProperties(Map<String, Object?>? properties) {
     return {
+      ...getContextProperties(),
       ...props,
       ...(properties ?? {}),
       ...getCommonEventProperties(),
