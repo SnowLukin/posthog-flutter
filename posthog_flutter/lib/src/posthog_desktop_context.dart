@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:posthog_dart/posthog_dart.dart' as pd;
 
+import 'posthog_flutter_version.dart';
 import 'util/logging.dart';
 
 /// PostHog client for desktop (Windows/Linux) that attaches the static
@@ -25,6 +26,15 @@ class DesktopPostHog extends pd.PostHog {
 
   @override
   Map<String, Object?> getContextProperties() => staticContext;
+
+  /// PostHog infers the flag evaluation runtime from the request User-Agent:
+  /// agents it does not recognize as a client SDK only receive flags whose
+  /// runtime is "all", so client-only flags silently vanish from /flags
+  /// responses. Present as the Flutter SDK (like the mobile platforms) to be
+  /// classified as a client.
+  @override
+  String? getCustomUserAgent() =>
+      '$postHogFlutterSdkName/$postHogFlutterVersion';
 }
 
 /// Collects static device/app context for desktop events, using the same
