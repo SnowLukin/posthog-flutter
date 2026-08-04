@@ -1,8 +1,10 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:posthog_flutter/src/logs/posthog_log_severity.dart';
 import 'package:posthog_flutter/src/posthog_config.dart';
 import 'package:posthog_flutter/src/posthog_event.dart';
 import 'package:posthog_flutter/src/posthog_flutter_io.dart';
+import 'package:posthog_flutter/src/posthog_internal_events.dart';
 
 // Simplified void callback for feature flags
 void emptyCallback() {}
@@ -236,6 +238,86 @@ void main() {
       final args = Map<String, dynamic>.from(call.arguments as Map);
       expect(args['userPropertiesToSet'], {'name': 'John Doe'});
       expect(args['userPropertiesToSetOnce'], {'created_at': '2024-03-01'});
+    });
+  });
+
+  group('PosthogFlutterIO properties for flags', () {
+    setUp(() async {
+      testConfig = PostHogConfig('test_project_token');
+      await posthogFlutterIO.setup(testConfig);
+    });
+
+    test('setPersonPropertiesForFlags sends userProperties', () async {
+      await posthogFlutterIO.setPersonPropertiesForFlags({
+        'storefront_country': 'US',
+        'superwall_demand_score': 88,
+      });
+
+      final call =
+          log.firstWhere((c) => c.method == 'setPersonPropertiesForFlags');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['userProperties'], {
+        'storefront_country': 'US',
+        'superwall_demand_score': 88,
+      });
+    });
+
+    test('resetPersonPropertiesForFlags sends method channel call', () async {
+      await posthogFlutterIO.resetPersonPropertiesForFlags();
+
+      expect(
+        log.any((c) => c.method == 'resetPersonPropertiesForFlags'),
+        isTrue,
+      );
+    });
+
+    test('setCaptureNativeScreens sends the enabled flag', () async {
+      await posthogFlutterIO.setCaptureNativeScreens(false);
+      await posthogFlutterIO.setCaptureNativeScreens(true);
+
+      final calls =
+          log.where((c) => c.method == 'setCaptureNativeScreens').toList();
+      expect(calls.map((c) => c.arguments), [
+        {'enabled': false},
+        {'enabled': true},
+      ]);
+    });
+
+    test('setGroupPropertiesForFlags sends groupType and properties', () async {
+      await posthogFlutterIO.setGroupPropertiesForFlags(
+        'organization',
+        {'name': 'ACME Corp', 'is_enterprise': true},
+      );
+
+      final call =
+          log.firstWhere((c) => c.method == 'setGroupPropertiesForFlags');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['groupType'], 'organization');
+      expect(args['groupProperties'], {
+        'name': 'ACME Corp',
+        'is_enterprise': true,
+      });
+    });
+
+    test('resetGroupPropertiesForFlags includes groupType when provided',
+        () async {
+      await posthogFlutterIO.resetGroupPropertiesForFlags(
+        groupType: 'organization',
+      );
+
+      final call =
+          log.firstWhere((c) => c.method == 'resetGroupPropertiesForFlags');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['groupType'], 'organization');
+    });
+
+    test('resetGroupPropertiesForFlags omits groupType when null', () async {
+      await posthogFlutterIO.resetGroupPropertiesForFlags();
+
+      final call =
+          log.firstWhere((c) => c.method == 'resetGroupPropertiesForFlags');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args.containsKey('groupType'), isFalse);
     });
   });
 
@@ -792,5 +874,166 @@ void main() {
         expect(eventOrder, isNot(['event_1', 'event_2', 'event_3']));
       },
     );
+  });
+
+  group('PosthogFlutterIO captureLog', () {
+    test('sends body, lowercase level name, and attributes', () async {
+      await posthogFlutterIO.captureLog(
+        body: 'checkout completed',
+        level: PostHogLogSeverity.warn,
+        attributes: {'order_id': 'ord_789'},
+      );
+
+      final call = log.firstWhere((c) => c.method == 'captureLog');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['body'], 'checkout completed');
+      expect(args['level'], 'warn');
+      expect(args['attributes'], {'order_id': 'ord_789'});
+    });
+
+    test('omits attributes when none provided', () async {
+      await posthogFlutterIO.captureLog(body: 'hello');
+
+      final call = log.firstWhere((c) => c.method == 'captureLog');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['level'], 'info');
+      expect(args.containsKey('attributes'), isFalse);
+    });
+
+    const severityWireNames = {
+      PostHogLogSeverity.trace: 'trace',
+      PostHogLogSeverity.debug: 'debug',
+      PostHogLogSeverity.info: 'info',
+      PostHogLogSeverity.warn: 'warn',
+      PostHogLogSeverity.error: 'error',
+      PostHogLogSeverity.fatal: 'fatal',
+    };
+    severityWireNames.forEach((severity, wireName) {
+      test('serializes ${severity.name} as "$wireName" on the wire', () async {
+        await posthogFlutterIO.captureLog(body: 'x', level: severity);
+
+        final call = log.firstWhere((c) => c.method == 'captureLog');
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        expect(args['level'], wireName);
+      });
+    });
+
+    test('normalizes unsupported attribute values for the channel', () async {
+      await posthogFlutterIO.captureLog(
+        body: 'event',
+        attributes: {'at': DateTime(2024, 3, 1)},
+      );
+
+      final call = log.firstWhere((c) => c.method == 'captureLog');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      final attributes = Map<String, dynamic>.from(args['attributes'] as Map);
+      // DateTime is not a StandardMessageCodec type; it is stringified.
+      expect(attributes['at'], isA<String>());
+    });
+
+    test('sends trace fields when provided', () async {
+      await posthogFlutterIO.captureLog(
+        body: 'event',
+        traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+        spanId: '00f067aa0ba902b7',
+        traceFlags: 1,
+      );
+
+      final call = log.firstWhere((c) => c.method == 'captureLog');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['traceId'], '4bf92f3577b34da6a3ce929d0e0e4736');
+      expect(args['spanId'], '00f067aa0ba902b7');
+      expect(args['traceFlags'], 1);
+    });
+
+    test('emits an explicit traceFlags of 0 but omits trace fields when null',
+        () async {
+      await posthogFlutterIO.captureLog(body: 'event', traceFlags: 0);
+
+      final call = log.firstWhere((c) => c.method == 'captureLog');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['traceFlags'], 0);
+      expect(args.containsKey('traceId'), isFalse);
+      expect(args.containsKey('spanId'), isFalse);
+    });
+  });
+
+  group('PosthogFlutterIO addExceptionStep', () {
+    test('sends message and normalized properties', () async {
+      await posthogFlutterIO.addExceptionStep(
+        'User tapped Checkout',
+        properties: {'screen': 'cart', 'at': DateTime(2024, 3, 1)},
+      );
+
+      final call = log.firstWhere((c) => c.method == 'addExceptionStep');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['message'], 'User tapped Checkout');
+      final properties = Map<String, dynamic>.from(args['properties'] as Map);
+      expect(properties['screen'], 'cart');
+      // DateTime is not a StandardMessageCodec type; it is stringified.
+      expect(properties['at'], isA<String>());
+    });
+
+    test('omits properties when none provided', () async {
+      await posthogFlutterIO.addExceptionStep('Opened modal');
+
+      final call = log.firstWhere((c) => c.method == 'addExceptionStep');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      expect(args['message'], 'Opened modal');
+      expect(args.containsKey('properties'), isFalse);
+    });
+  });
+
+  group('onNativeOcclusionChanged', () {
+    Future<void> pushOcclusion(Map<String, Object?> arguments) async {
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+        channel.name,
+        channel.codec.encodeMethodCall(
+          MethodCall('onNativeOcclusionChanged', arguments),
+        ),
+        (ByteData? data) {},
+      );
+    }
+
+    setUp(() async {
+      testConfig = PostHogConfig('test_project_token');
+      await posthogFlutterIO.setup(testConfig);
+      PostHogInternalEvents.nativeOcclusionActive = false;
+      PostHogInternalEvents.nativeOcclusionEpisode = 0;
+      PostHogInternalEvents.nativeBridgeFailed = false;
+      PostHogInternalEvents.nativeOcclusionEvent.value = 0;
+    });
+
+    test('maps arguments into the occlusion state and notifies', () async {
+      await pushOcclusion(
+        {'occluded': true, 'episode': 7, 'bridgeFailed': true},
+      );
+
+      expect(PostHogInternalEvents.nativeOcclusionActive, isTrue);
+      expect(PostHogInternalEvents.nativeOcclusionEpisode, 7);
+      expect(PostHogInternalEvents.nativeBridgeFailed, isTrue);
+      expect(PostHogInternalEvents.nativeOcclusionEvent.value, 1);
+    });
+
+    test('missing arguments reset to not-occluded episode 0', () async {
+      await pushOcclusion(
+        {'occluded': true, 'episode': 7, 'bridgeFailed': true},
+      );
+      await pushOcclusion(<String, Object?>{});
+
+      expect(PostHogInternalEvents.nativeOcclusionActive, isFalse);
+      expect(PostHogInternalEvents.nativeOcclusionEpisode, 0);
+      expect(PostHogInternalEvents.nativeBridgeFailed, isFalse);
+      expect(PostHogInternalEvents.nativeOcclusionEvent.value, 2);
+    });
+
+    test('an unchanged payload still notifies listeners', () async {
+      final payload = {'occluded': true, 'episode': 3, 'bridgeFailed': false};
+      await pushOcclusion(payload);
+      await pushOcclusion(payload);
+
+      expect(PostHogInternalEvents.nativeOcclusionEvent.value, 2);
+    });
   });
 }

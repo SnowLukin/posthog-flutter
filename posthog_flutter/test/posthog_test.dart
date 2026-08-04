@@ -1,7 +1,12 @@
-import 'package:flutter/foundation.dart';
+import 'dart:async';
+
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:posthog_flutter/posthog_flutter.dart';
 import 'package:posthog_flutter/src/posthog_flutter_platform_interface.dart';
+import 'package:posthog_flutter/src/posthog_internal_events.dart';
+import 'package:posthog_flutter/src/replay/mask/posthog_mask_controller.dart';
+import 'package:posthog_flutter/src/replay/screenshot/screenshot_capturer.dart';
 
 import 'posthog_flutter_platform_interface_fake.dart';
 
@@ -11,9 +16,10 @@ void main() {
   group('Posthog', () {
     late PosthogFlutterPlatformFake fakePlatformInterface;
 
-    setUp(() {
+    setUp(() async {
       fakePlatformInterface = PosthogFlutterPlatformFake();
       PosthogFlutterPlatformInterface.instance = fakePlatformInterface;
+      await Posthog().close();
     });
 
     test(
@@ -35,6 +41,77 @@ void main() {
         );
       },
     );
+
+    test(
+      'setup after close with different masking flags rebuilds the parser map',
+      () async {
+        final controller = PostHogMaskController.instance;
+        addTearDown(() => controller.refreshParsers(null));
+
+        final imagesMasked = PostHogConfig('test_project_token');
+        await Posthog().setup(imagesMasked);
+        expect(controller.parsers.keys, contains('RenderImage'));
+
+        await Posthog().close();
+        final imagesUnmasked = PostHogConfig('test_project_token')
+          ..sessionReplayConfig.maskAllImages = false;
+        await Posthog().setup(imagesUnmasked);
+        expect(controller.parsers.keys, isNot(contains('RenderImage')));
+        expect(controller.parsers.keys, contains('RenderParagraph'));
+      },
+    );
+
+    test(
+      'screenshot capturer resolves the live config after close and re-setup',
+      () async {
+        final first = PostHogConfig('test_project_token')
+          ..sessionReplayConfig.maskAllImages = false;
+        await Posthog().setup(first);
+        // PostHogWidget builds its capturer once and keeps it across a
+        // close()/setup() reconfigure, so the capturer must follow the live
+        // config rather than the one it was constructed with.
+        final capturer = ScreenshotCapturer(first);
+        expect(capturer.effectiveConfig, same(first));
+
+        await Posthog().close();
+        final second = PostHogConfig('test_project_token');
+        await Posthog().setup(second);
+        expect(capturer.effectiveConfig, same(second));
+      },
+    );
+
+    group('setup with blank project token', () {
+      const blankProjectTokens = <String, String>{
+        'empty string': '',
+        'space': ' ',
+        'tab': '\t',
+        'mixed whitespace': ' \n\t ',
+      };
+
+      for (final entry in blankProjectTokens.entries) {
+        test('skips platform setup and integrations for ${entry.key}',
+            () async {
+          final originalFlutterErrorHandler = FlutterError.onError;
+          void sentinelHandler(FlutterErrorDetails _) {}
+          FlutterError.onError = sentinelHandler;
+
+          try {
+            final config = PostHogConfig(entry.value);
+            config.sessionReplay = true;
+            config.errorTrackingConfig.captureFlutterErrors = true;
+
+            await Posthog().setup(config);
+
+            expect(fakePlatformInterface.receivedConfig, isNull);
+            expect(Posthog().config, isNull);
+            expect(PostHogInternalEvents.sessionRecordingActive.value, isFalse);
+            expect(FlutterError.onError, same(sentinelHandler));
+          } finally {
+            FlutterError.onError = originalFlutterErrorHandler;
+          }
+        });
+      }
+    });
 
     test(
       'enable reinstalls Flutter error autocapture after disable',
@@ -102,6 +179,148 @@ void main() {
 
       expect(config.host, equals('https://us.i.posthog.com'));
       expect(config.toMap()['host'], equals('https://us.i.posthog.com'));
+    });
+
+    test('session replay masks all platform views by default', () {
+      final config = PostHogConfig('test_project_token');
+
+      expect(config.sessionReplayConfig.maskAllPlatformViews, isTrue);
+
+      final replayConfig =
+          config.toMap()['sessionReplayConfig'] as Map<String, dynamic>;
+      expect(replayConfig.containsKey('maskAllPlatformViews'), isTrue);
+      expect(replayConfig['maskAllPlatformViews'], isTrue);
+
+      config.sessionReplayConfig.maskAllPlatformViews = false;
+
+      final updatedReplayConfig =
+          config.toMap()['sessionReplayConfig'] as Map<String, dynamic>;
+      expect(updatedReplayConfig['maskAllPlatformViews'], isFalse);
+    });
+
+    test('native screen bridge is opt-in (default false)', () {
+      final config = PostHogConfig('test_project_token');
+
+      expect(config.sessionReplayConfig.captureNativeScreens, isFalse);
+
+      // The flag crosses the channel so the plugins can decide whether to
+      // start the occlusion detector.
+      final replayConfig =
+          config.toMap()['sessionReplayConfig'] as Map<String, dynamic>;
+      expect(replayConfig['captureNativeScreens'], isFalse);
+      // The mask flags cross too: the native plugins forward them to the
+      // native SDK unconditionally so bridged native screens honor the
+      // app-wide masking choice regardless of when the bridge is toggled.
+      expect(replayConfig['maskAllTexts'], isTrue);
+      expect(replayConfig['maskAllImages'], isTrue);
+    });
+
+    test('omits bootstrap from toMap when not set', () {
+      final config = PostHogConfig('test_project_token');
+
+      expect(config.bootstrap, isNull);
+      expect(config.toMap().containsKey('bootstrap'), isFalse);
+    });
+
+    test('serializes an identified identity bootstrap', () {
+      final config = PostHogConfig('test_project_token')
+        ..bootstrap = const PostHogBootstrapConfig(
+          distinctId: 'user-123',
+          isIdentifiedId: true,
+        );
+
+      final bootstrap = config.toMap()['bootstrap'] as Map<String, Object?>;
+      expect(bootstrap['distinctId'], equals('user-123'));
+      expect(bootstrap['isIdentifiedId'], isTrue);
+      expect(bootstrap.containsKey('featureFlags'), isFalse);
+      expect(bootstrap.containsKey('featureFlagPayloads'), isFalse);
+    });
+
+    test('defaults isIdentifiedId to false and serializes it', () {
+      final config = PostHogConfig('test_project_token')
+        ..bootstrap = const PostHogBootstrapConfig(distinctId: 'anon-abc');
+
+      final bootstrap = config.toMap()['bootstrap'] as Map<String, Object?>;
+      expect(bootstrap['distinctId'], equals('anon-abc'));
+      expect(bootstrap['isIdentifiedId'], isFalse);
+    });
+
+    test('serializes feature flags and payloads without identity', () {
+      final config = PostHogConfig('test_project_token')
+        ..bootstrap = const PostHogBootstrapConfig(
+          featureFlags: {'beta-ui': 'variant-a', 'legacy': true},
+          featureFlagPayloads: {
+            'beta-ui': {'color': 'blue'},
+            'legacy': null,
+          },
+        );
+
+      final bootstrap = config.toMap()['bootstrap'] as Map<String, Object?>;
+      expect(bootstrap.containsKey('distinctId'), isFalse);
+      expect(bootstrap['isIdentifiedId'], isFalse);
+      expect(
+        bootstrap['featureFlags'],
+        equals({'beta-ui': 'variant-a', 'legacy': true}),
+      );
+      expect(
+        bootstrap['featureFlagPayloads'],
+        equals({
+          'beta-ui': {'color': 'blue'},
+          'legacy': null,
+        }),
+      );
+    });
+
+    test('warns on a non-bool/String featureFlags value but still forwards it',
+        () {
+      final config = PostHogConfig('test_project_token')
+        ..bootstrap = const PostHogBootstrapConfig(
+          featureFlags: {'discount-tier': 2, 'beta-ui': 'variant-a'},
+        );
+
+      final logs = <String>[];
+      final map = runZoned(
+        config.toMap,
+        zoneSpecification: ZoneSpecification(
+          print: (_, __, ___, line) => logs.add(line),
+        ),
+      );
+
+      // The mismatched value is still forwarded; the native SDK drops it.
+      final bootstrap = map['bootstrap'] as Map<String, Object?>;
+      expect(
+        bootstrap['featureFlags'],
+        equals({'discount-tier': 2, 'beta-ui': 'variant-a'}),
+      );
+      // ...but the caller gets a breadcrumb for the ignored entry, and no
+      // false warning for the valid String value.
+      expect(logs.where((l) => l.contains('discount-tier')), isNotEmpty);
+      expect(logs.where((l) => l.contains('beta-ui')), isEmpty);
+    });
+  });
+
+  group('PostHogPlatformView', () {
+    testWidgets('defaults privacy to mask', (tester) async {
+      const view = PostHogPlatformView(child: SizedBox());
+      expect(view.privacy, PostHogPlatformViewPrivacy.mask);
+    });
+
+    testWidgets('keeps the requested capture privacy', (tester) async {
+      const view = PostHogPlatformView(
+        privacy: PostHogPlatformViewPrivacy.capture,
+        child: SizedBox(),
+      );
+      expect(view.privacy, PostHogPlatformViewPrivacy.capture);
+    });
+
+    testWidgets('renders its child unchanged', (tester) async {
+      await tester.pumpWidget(
+        const Directionality(
+          textDirection: TextDirection.ltr,
+          child: PostHogPlatformView(child: Text('child')),
+        ),
+      );
+      expect(find.text('child'), findsOneWidget);
     });
   });
 
@@ -359,6 +578,167 @@ void main() {
 
       expect(result, isNotNull);
       expect(result!.enabled, isFalse);
+    });
+  });
+
+  group('Posthog properties for flags', () {
+    late PosthogFlutterPlatformFake fake;
+
+    setUp(() async {
+      fake = PosthogFlutterPlatformFake();
+      PosthogFlutterPlatformInterface.instance = fake;
+      await Posthog().close();
+    });
+
+    test('setPersonPropertiesForFlags sets props and reloads by default',
+        () async {
+      await Posthog().setPersonPropertiesForFlags({'country': 'US'});
+
+      expect(fake.setPersonPropertiesForFlagsCalls, [
+        {'country': 'US'},
+      ]);
+      expect(fake.reloadFeatureFlagsCount, 1);
+    });
+
+    test(
+        'setPersonPropertiesForFlags skips reload when reloadFeatureFlags=false',
+        () async {
+      await Posthog().setPersonPropertiesForFlags(
+        {'country': 'US'},
+        reloadFeatureFlags: false,
+      );
+
+      expect(fake.setPersonPropertiesForFlagsCalls.length, 1);
+      expect(fake.reloadFeatureFlagsCount, 0);
+    });
+
+    test('setPersonPropertiesForFlags is a no-op for empty map', () async {
+      await Posthog().setPersonPropertiesForFlags({});
+
+      expect(fake.setPersonPropertiesForFlagsCalls, isEmpty);
+      expect(fake.reloadFeatureFlagsCount, 0);
+    });
+
+    test('resetPersonPropertiesForFlags resets and reloads by default',
+        () async {
+      await Posthog().resetPersonPropertiesForFlags();
+
+      expect(fake.resetPersonPropertiesForFlagsCount, 1);
+      expect(fake.reloadFeatureFlagsCount, 1);
+    });
+
+    test('setGroupPropertiesForFlags passes groupType and reloads', () async {
+      await Posthog().setGroupPropertiesForFlags(
+        'organization',
+        {'name': 'ACME'},
+      );
+
+      expect(fake.setGroupPropertiesForFlagsCalls, [
+        {
+          'groupType': 'organization',
+          'groupProperties': {'name': 'ACME'},
+        },
+      ]);
+      expect(fake.reloadFeatureFlagsCount, 1);
+    });
+
+    test('setGroupPropertiesForFlags is a no-op for empty map', () async {
+      await Posthog().setGroupPropertiesForFlags('organization', {});
+
+      expect(fake.setGroupPropertiesForFlagsCalls, isEmpty);
+      expect(fake.reloadFeatureFlagsCount, 0);
+    });
+
+    test('resetGroupPropertiesForFlags forwards groupType and reloads',
+        () async {
+      await Posthog().resetGroupPropertiesForFlags(groupType: 'organization');
+
+      expect(fake.resetGroupPropertiesForFlagsCalls, ['organization']);
+      expect(fake.reloadFeatureFlagsCount, 1);
+    });
+
+    test('resetGroupPropertiesForFlags forwards null when groupType omitted',
+        () async {
+      await Posthog().resetGroupPropertiesForFlags(reloadFeatureFlags: false);
+
+      expect(fake.resetGroupPropertiesForFlagsCalls, [null]);
+      expect(fake.reloadFeatureFlagsCount, 0);
+    });
+  });
+
+  group('Posthog addExceptionStep', () {
+    late PosthogFlutterPlatformFake fake;
+
+    setUp(() async {
+      fake = PosthogFlutterPlatformFake();
+      PosthogFlutterPlatformInterface.instance = fake;
+      await Posthog().close();
+    });
+
+    test('forwards message and properties to the platform', () async {
+      await Posthog().addExceptionStep(
+        'User tapped Checkout',
+        properties: {'screen': 'cart'},
+      );
+
+      expect(fake.addExceptionStepCalls, [
+        {
+          'message': 'User tapped Checkout',
+          'properties': {'screen': 'cart'},
+        },
+      ]);
+    });
+
+    test('forwards message without properties', () async {
+      await Posthog().addExceptionStep('Opened modal');
+
+      expect(fake.addExceptionStepCalls, [
+        {'message': 'Opened modal', 'properties': null},
+      ]);
+    });
+
+    test('is a no-op for an empty message', () async {
+      await Posthog().addExceptionStep('');
+
+      expect(fake.addExceptionStepCalls, isEmpty);
+    });
+
+    test('is a no-op for a whitespace-only message', () async {
+      await Posthog().addExceptionStep('   \t\n');
+
+      expect(fake.addExceptionStepCalls, isEmpty);
+    });
+
+    test('is a no-op when exception steps are disabled', () async {
+      final config = PostHogConfig('test_project_token')
+        ..errorTrackingConfig.exceptionSteps.enabled = false;
+      await Posthog().setup(config);
+
+      await Posthog().addExceptionStep('User tapped Checkout');
+
+      expect(fake.addExceptionStepCalls, isEmpty);
+    });
+  });
+
+  group('PostHogExceptionStepsConfig', () {
+    test('toMap serializes the native defaults', () {
+      final config = PostHogConfig('test_project_token');
+
+      expect(
+        config.errorTrackingConfig.exceptionSteps.toMap(),
+        {'enabled': true, 'maxBytes': 32768},
+      );
+    });
+
+    test('toMap reflects overridden values', () {
+      final config = PostHogConfig('test_project_token')
+        ..errorTrackingConfig.exceptionSteps.enabled = false
+        ..errorTrackingConfig.exceptionSteps.maxBytes = 1024;
+
+      expect(
+        config.errorTrackingConfig.exceptionSteps.toMap(),
+        {'enabled': false, 'maxBytes': 1024},
+      );
     });
   });
 }

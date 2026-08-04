@@ -11,18 +11,23 @@ runs:
   using: composite
   steps:
     - name: Setup Flutter
-      uses: subosito/flutter-action@fd55f4c5af5b953cc57a2be44cb082c8f6635e8e # v2.21.0
+      # axi92/flutter-action is a fork of subosito/flutter-action that SHA-pins its internal
+      # actions/cache calls; subosito itself uses tag refs which conflicts with our org-wide
+      # "Require actions to be pinned to a full-length commit SHA" policy. Tracks upstream.
+      uses: axi92/flutter-action@36d2c2625bac6ea011cd7808d2a01bd8a7e5c766 # feature/pin-action-sha @ 2026-04-30
       with:
         channel: 'stable'
 
-    - name: Setup pnpm
-      uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v6
+    - name: Setup pnpm and Node.js
+      uses: pnpm/setup@f7d0e5f4b1b3089d2799ef9722859e7ba314c4c8 # v1
       with:
-        node-version-file: .nvmrc
-        cache: 'pnpm'
+        # TODO: pnpm/setup does not read .nvmrc yet. Keep this in sync with .nvmrc
+        # until https://github.com/jasongin/nvs/pull/315 lands.
+        # pnpm/setup installs runtimes via pnpm runtime, which requires pnpm >=11.1.0.
+        version: 11.7.0
+        runtime: node@24
+        cache: true
+        install: false
 
     - name: Install Flutter dependencies
       if: inputs.install == 'true'

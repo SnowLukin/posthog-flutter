@@ -1,5 +1,7 @@
 // ignore_for_file: avoid_dynamic_calls
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:posthog_flutter/src/error_tracking/dart_exception_processor.dart';
 import 'package:posthog_flutter/src/error_tracking/posthog_exception.dart';
@@ -81,15 +83,27 @@ void main() {
       final frames = stackTraceData['frames'] as List<Map<String, dynamic>>;
       expect(frames, isNotEmpty);
 
-      // Verify first frame structure (should be main function)
-      final firstFrame = frames.first;
-      expect(firstFrame.containsKey('function'), isTrue);
-      expect(firstFrame.containsKey('filename'), isTrue);
-      expect(firstFrame.containsKey('lineno'), isTrue);
-      expect(firstFrame['platform'], equals('dart'));
+      // Frames use PostHog's canonical bottom-up order: the crash site is the
+      // last frame. Here the innermost frame of the input trace is
+      // `Object.noSuchMethod`, so it must end up last.
+      final crashFrame = frames.last;
+      expect(crashFrame.containsKey('function'), isTrue);
+      expect(crashFrame['function'], equals('Object.noSuchMethod'));
+      expect(crashFrame['platform'], equals('dart'));
 
-      // Verify inApp detection works - just check that the field exists and is boolean
-      expect(firstFrame['in_app'], isTrue);
+      // The application entry point (`main`) must appear before the crash site.
+      final mainIndex = frames.indexWhere(
+        (frame) => frame['filename'] == 'test.dart',
+      );
+      final noSuchMethodIndex = frames.lastIndexWhere(
+        (frame) => frame['function'] == 'Object.noSuchMethod',
+      );
+      expect(mainIndex, greaterThanOrEqualTo(0));
+      expect(
+        mainIndex,
+        lessThan(noSuchMethodIndex),
+        reason: 'entry point should precede the crash site',
+      );
 
       // Check that dart core frames are marked as not inApp
       final dartFrame = frames.firstWhere(
@@ -364,14 +378,79 @@ void main() {
           result['\$exception_list'] as List<Map<String, dynamic>>;
       final frames = exceptionData.first['stacktrace']['frames'] as List;
 
-      // Should include frames since we provided the stack trace
-      expect(frames[0]['package'], 'my_app');
-      expect(frames[0]['filename'], 'main.dart');
-      // earlier PH frames should be untouched
-      expect(frames[1]['package'], 'posthog_flutter');
-      expect(frames[1]['filename'], 'posthog.dart');
-      expect(frames[2]['package'], 'some_lib');
-      expect(frames[2]['filename'], 'lib.dart');
+      // Frames are emitted in canonical bottom-up order (crash site last), so
+      // the three surviving user frames occupy the tail. The leading PostHog
+      // wrapper frames (innermost) are stripped; the interior PostHog frame is
+      // kept.
+      final tail = frames.sublist(frames.length - 3);
+
+      // Crash site (innermost of the input) is last.
+      expect(tail[2]['package'], 'my_app');
+      expect(tail[2]['filename'], 'main.dart');
+      // Interior PostHog frame is preserved (only leading ones are stripped).
+      expect(tail[1]['package'], 'posthog_flutter');
+      expect(tail[1]['filename'], 'posthog.dart');
+      // Entry point is first of the three.
+      expect(tail[0]['package'], 'some_lib');
+      expect(tail[0]['filename'], 'lib.dart');
+    });
+
+    test(
+        'emits frames in canonical bottom-up order (entry point first, '
+        'crash site last)', () {
+      final exception = Exception('Test exception');
+
+      // A linear (single-trace) synthetic stack in Dart's native
+      // innermost-first order: the crash site is #0 and the entry point is #2.
+      final stackTrace = StackTrace.fromString('''
+#0      crashSite (package:my_app/crash.dart:10:3)
+#1      middle (package:my_app/middle.dart:20:5)
+#2      entryPoint (package:my_app/main.dart:30:7)
+''');
+
+      final result = DartExceptionProcessor.processException(
+        error: exception,
+        stackTrace: stackTrace,
+        inAppByDefault: true,
+      );
+
+      final exceptionData =
+          result['\$exception_list'] as List<Map<String, dynamic>>;
+      final frames = exceptionData.first['stacktrace']['frames']
+          as List<Map<String, dynamic>>;
+
+      final entryIndex = frames.indexWhere(
+        (frame) => frame['function'] == 'entryPoint',
+      );
+      final middleIndex = frames.indexWhere(
+        (frame) => frame['function'] == 'middle',
+      );
+      final crashIndex = frames.indexWhere(
+        (frame) => frame['function'] == 'crashSite',
+      );
+
+      expect(entryIndex, greaterThanOrEqualTo(0));
+      expect(middleIndex, greaterThanOrEqualTo(0));
+      expect(crashIndex, greaterThanOrEqualTo(0));
+
+      // Canonical bottom-up: entry point precedes the crash site.
+      expect(
+        entryIndex,
+        lessThan(middleIndex),
+        reason: 'entry point must come before intermediate frames',
+      );
+      expect(
+        middleIndex,
+        lessThan(crashIndex),
+        reason: 'crash site must be the last of the application frames',
+      );
+
+      // The crash site is the very last frame emitted.
+      expect(
+        frames.last['function'],
+        equals('crashSite'),
+        reason: 'the last frame must be the crash site',
+      );
     });
 
     test('marks generated stack frames as synthetic', () {
@@ -590,7 +669,191 @@ void main() {
         expect(exceptionData['mechanism']['type'], equals('test_mechanism'));
       }
     });
+
+    group('cause chain', () {
+      final synchronousCases = <({
+        String description,
+        Object Function() buildError,
+        StackTrace? stackTrace,
+        List<String> expectedTypes,
+        Map<int, String> expectedValues,
+        void Function(List<Map<String, dynamic>>) extraExpectations,
+      })>[
+        (
+          description:
+              'walks AsyncError into multiple exception items, outermost-first',
+          buildError: () {
+            late StateError rootError;
+            try {
+              throw StateError('root cause');
+            } catch (error) {
+              rootError = error as StateError;
+            }
+
+            return AsyncError(rootError, rootError.stackTrace!);
+          },
+          stackTrace: null,
+          expectedTypes: ['AsyncError', 'StateError'],
+          expectedValues: {1: 'Bad state: root cause'},
+          extraExpectations: (exceptionList) {
+            // The cause carries its own (thrown) stack trace
+            expect(exceptionList[1]['stacktrace'], isNotNull);
+            expect(
+              (exceptionList[1]['stacktrace']['frames'] as List).isNotEmpty,
+              isTrue,
+            );
+
+            // Causes reuse the outer mechanism
+            expect(exceptionList[1]['mechanism']['handled'], isTrue);
+            expect(exceptionList[1]['mechanism']['type'], equals('generic'));
+            expect(exceptionList[1]['mechanism']['synthetic'], isFalse);
+          },
+        ),
+        (
+          description: 'walks duck-typed cause getters',
+          buildError: () {
+            final root = FormatException('root');
+            final middle = _ChainedException('middle', root);
+            return _ChainedException('outer', middle);
+          },
+          stackTrace: StackTrace.fromString('#0 test (test.dart:1:1)'),
+          expectedTypes: [
+            '_ChainedException',
+            '_ChainedException',
+            'FormatException',
+          ],
+          expectedValues: {0: 'outer', 1: 'middle'},
+          extraExpectations: (_) {},
+        ),
+        (
+          description: 'does not add causes for errors without one',
+          buildError: () => StateError('no cause'),
+          stackTrace: StackTrace.fromString('#0 test (test.dart:1:1)'),
+          expectedTypes: ['StateError'],
+          expectedValues: const {},
+          extraExpectations: (_) {},
+        ),
+      ];
+
+      for (final testCase in synchronousCases) {
+        test(testCase.description, () {
+          final result = DartExceptionProcessor.processException(
+            error: testCase.buildError(),
+            stackTrace: testCase.stackTrace,
+          );
+
+          final exceptionList =
+              result['\$exception_list'] as List<Map<String, dynamic>>;
+
+          expect(exceptionList, hasLength(testCase.expectedTypes.length));
+          for (final (index, expectedType) in testCase.expectedTypes.indexed) {
+            expect(exceptionList[index]['type'], equals(expectedType));
+          }
+          for (final entry in testCase.expectedValues.entries) {
+            expect(exceptionList[entry.key]['value'], equals(entry.value));
+          }
+          testCase.extraExpectations(exceptionList);
+        });
+      }
+
+      test('walks ParallelWaitError to every failed future', () async {
+        Object? caught;
+        try {
+          await [
+            Future<int>.error(StateError('first parallel failure')),
+            Future<int>.value(1),
+            Future<int>.error(FormatException('second parallel failure')),
+          ].wait;
+        } catch (error) {
+          caught = error;
+        }
+
+        expect(caught, isA<ParallelWaitError>());
+
+        final result = DartExceptionProcessor.processException(error: caught!);
+
+        final exceptionList =
+            result['\$exception_list'] as List<Map<String, dynamic>>;
+
+        expect(exceptionList, hasLength(5));
+        expect(exceptionList[0]['type'], startsWith('ParallelWaitError'));
+        expect(exceptionList[1]['type'], equals('AsyncError'));
+        expect(exceptionList[2]['type'], equals('StateError'));
+        expect(
+          exceptionList[2]['value'],
+          equals('Bad state: first parallel failure'),
+        );
+        expect(exceptionList[3]['type'], equals('AsyncError'));
+        expect(exceptionList[4]['type'], equals('FormatException'));
+        expect(
+          exceptionList[4]['value'],
+          equals('FormatException: second parallel failure'),
+        );
+      });
+
+      test('guards against cause cycles', () {
+        final a = _MutableCauseException('a');
+        final b = _MutableCauseException('b');
+        a.cause = b;
+        b.cause = a;
+
+        final result = DartExceptionProcessor.processException(
+          error: a,
+          stackTrace: StackTrace.fromString('#0 test (test.dart:1:1)'),
+        );
+
+        final exceptionList =
+            result['\$exception_list'] as List<Map<String, dynamic>>;
+
+        expect(exceptionList, hasLength(2));
+        expect(exceptionList[0]['value'], equals('a'));
+        expect(exceptionList[1]['value'], equals('b'));
+      });
+
+      test('caps the cause chain length', () {
+        Object error = FormatException('root');
+        for (var i = 0; i < 20; i++) {
+          error = _ChainedException('wrapper $i', error);
+        }
+
+        final result = DartExceptionProcessor.processException(
+          error: error,
+          stackTrace: StackTrace.fromString('#0 test (test.dart:1:1)'),
+        );
+
+        final exceptionList =
+            result['\$exception_list'] as List<Map<String, dynamic>>;
+
+        expect(
+          exceptionList,
+          hasLength(DartExceptionProcessor.maxExceptionChainLength),
+        );
+        expect(exceptionList.first['value'], equals('wrapper 19'));
+      });
+    });
   });
+}
+
+/// Exception exposing the common duck-typed `cause` convention
+class _ChainedException implements Exception {
+  final String message;
+  final Object? cause;
+
+  _ChainedException(this.message, this.cause);
+
+  @override
+  String toString() => message;
+}
+
+/// Exception with a mutable cause, used to build cause cycles
+class _MutableCauseException implements Exception {
+  final String message;
+  Object? cause;
+
+  _MutableCauseException(this.message);
+
+  @override
+  String toString() => message;
 }
 
 // Helper functions to generate async stack traces for testing

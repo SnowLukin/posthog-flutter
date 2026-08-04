@@ -1,5 +1,188 @@
 ## Next
 
+## 5.34.2
+
+### Patch Changes
+
+- 1cb3a7c: Fix session replay masking on iOS and Android ignoring changed `maskAllTexts`/`maskAllImages` flags when `setup()` is called again
+
+## 5.34.1
+
+### Patch Changes
+
+- 3baf48d: Fix web canvas masking discarding an app-provided `maskRegionsFn` — canvases outside the Flutter view now get the app's original callback instead of recording unmasked
+
+## 5.34.0
+
+### Minor Changes
+
+- 0d8b279: Add session replay canvas masking on Flutter web: `maskAllTexts`, `maskAllImages`, `PostHogMaskWidget`, and obscured text fields now apply to the CanvasKit canvas — enable by declaring `session_recording.canvasCapture.maskRegionsFn` in `posthog.init`, or just by mounting a `PostHogMaskWidget` (requires posthog-js 1.408.0+)
+
+### Patch Changes
+
+- 0d8b279: Fix `maskAllTexts: false` still masking `Text` widgets when `maskAllImages` is enabled
+
+## 5.33.4
+
+### Patch Changes
+
+- 69c8859: Clean up Android build warnings.
+
+## 5.33.3
+
+### Patch Changes
+
+- e835d19: Flutter web (WebAssembly): enabling `captureIsolateErrors` no longer crashes the app at startup. The isolate error handler was selected with a `dart.library.html` conditional import, which is false under dart2wasm, so wasm builds compiled the `dart:isolate` implementation and threw `Unsupported operation: RawReceivePort` before `runApp` — a white screen. The import now keys on `dart.library.js_interop` (true for both JS and wasm web builds), and the setup guard also skips isolate wiring on web explicitly. JS web builds and mobile/desktop are unaffected.
+
+## 5.33.2
+
+### Patch Changes
+
+- 771e558: Flutter web: `PostHogWidget` no longer runs the mobile session replay screenshot pipeline. On web, session replay is recorded by posthog-js, and every snapshot this pipeline produced was discarded — but it still walked the whole render tree twice per second (once for `PostHogMaskWidget` wrappers, once more when `maskAllTexts` or `maskAllImages` is on) for as long as the app was open. Web apps that enable `sessionReplay` and mount `PostHogWidget` no longer pay for that. Replay on web is unaffected, and `PostHogWidget` still mounts as before, so it remains safe to keep in a shared widget tree across web and mobile.
+
+## 5.33.1
+
+### Patch Changes
+
+- b9471d4: Session replay: masks every element that matched a masking rule, at any depth. The rect collector only walked two levels of the matched-element tree and dropped any node that had more than one matched child, so with `maskAllTexts`/`maskAllImages` enabled a `PostHogMaskWidget` wrapping several masked children lost its own mask rect, and whatever it wrapped that matched no rule on its own (a decorated container, a chart, a custom-painted avatar) stayed visible in the recording. More of the screen is masked as a result: a `PostHogMaskWidget` now covers its whole subtree, as documented, instead of only the children that matched.
+
+## 5.33.0
+
+### Minor Changes
+
+- 34dde19: Emit Dart error-tracking stack frames in PostHog's canonical bottom-up wire order: `$exception_list[].stacktrace.frames[0]` is now the outermost/entry-point frame and the last frame is the crash site (previously innermost-first). Applies to the primary exception and every cause in the chain. Raise the Android SDK floor to 3.56.0 so native Android exceptions use the same canonical order; Apple-native exceptions already do.
+
+## 5.32.1
+
+### Patch Changes
+
+- bbf20fa: Android: session replay screenshots are decoded, re-encoded, and queued off the main thread. Previously each frame cost the main thread 25-75ms on midrange hardware (up to once per second while recording), a visible per-second hitch during scrolling — iOS already did this work on a background queue.
+
+## 5.32.0
+
+### Minor Changes
+
+- 22dbde4: Session replay can now capture native screens that cover the Flutter app (full-screen paywalls, presented view controllers, native activities). Opt in with `captureNativeScreens = true`: while a native screen is up, capture is handed to the native PostHog SDK so it becomes visible in replay (requires native SDK support). When enabled but the capture cannot be produced, a black placeholder frame is shown for that screen instead. Off by default — with the flag off nothing is captured or blanked, and replay keeps showing the covered Flutter UI as before. Captured native screens honor your app-wide `maskAllTexts`/`maskAllImages` settings; setting them false reveals native text/images too, including native input fields.
+
+  Not captured:
+
+  - Partial-height sheets (Apple Pay, share sheet, `.pageSheet`/`.formSheet` modals)
+  - Content rendered by another process (Apple Pay, photo picker) — blank if the surrounding screen is captured
+  - Android: anything that is not a full activity in your app's process (Chrome Custom Tabs, Google Pay, dialogs, bottom sheets, permission prompts)
+  - iOS: covers without an opaque background (camera previews, image/blur backdrops)
+
+  Screens that are not captured keep the previous behavior: replay keeps showing the covered Flutter UI.
+
+  The flag can also be toggled at runtime. Turning it off takes effect immediately: toggling off right before presenting a sensitive native screen guarantees that screen is not captured. Enable it before presenting a screen you want captured — enabling while a native screen is already up may not capture that screen.
+
+  Requires posthog-ios >= 3.66.0 and posthog-android >= 3.55.0 (resolved automatically by the bundled dependency ranges).
+
+### Patch Changes
+
+- 22dbde4: Android: session replay screenshots are now timestamped with the native SDK's clock instead of the system clock. The two can diverge (the SDK prefers the network-time clock on API 33+), which scrambled the replay timeline — frames appeared at a different time than touch events and native-captured screens.
+
+## 5.31.0
+
+### Minor Changes
+
+- db486b0: Add a `bootstrap` option to `PostHogConfig` for pre-seeding identity and feature flags before the first `/flags` response. Set `config.bootstrap = PostHogBootstrapConfig(...)` before `setup()` so early events carry a caller-controlled distinct ID and flag reads return your values during cold start. The values are forwarded to the native iOS and Android SDKs and mirror the `bootstrap` option in posthog-js. On Flutter web, configure `bootstrap` in your `posthog.init` call instead.
+
+## 5.30.1
+
+### Patch Changes
+
+- d4c7fb8: Require posthog-android 3.54.1 or newer. Earlier 3.x versions performed replay work on every touch (a network-time Binder call, a `MotionEvent` copy, and a replay-executor submission) even when session replay was disabled or sampled out, which could cause ANRs on Android. Projects with a Gradle lockfile or cached dependency resolution could stay pinned to an affected version; the raised floor guarantees the fixed SDK.
+
+## 5.30.0
+
+### Minor Changes
+
+- b851632: Improve error-tracking cause handling: `captureException` now walks an error's cause chain (`AsyncError`, all enumerable `ParallelWaitError` failures, and exceptions exposing a `cause` getter) into multiple `$exception_list` items, outermost-first (wrapper first, root cause last), with a cycle guard and a depth cap of 10.
+
+## 5.29.0
+
+### Minor Changes
+
+- de7b5e8: Platform views are now masked by default in session replay (they now appear as a black box). Use `maskAllPlatformViews = false` to disable masking globally, or wrap individual views in `PostHogPlatformView(privacy: PostHogPlatformViewPrivacy.capture)` to reveal them selectively.
+
+## 5.28.0
+
+### Minor Changes
+
+- 3fe9ab2: Add `addExceptionStep`, recording breadcrumb-style context records that attach to every captured `$exception` as `$exception_steps`, giving the error-tracking UI a timeline of recent activity leading up to each error.
+
+  Steps accumulate in a rolling, byte-bounded buffer owned by the embedded native SDK, so they also survive native fatal crashes and attach to the crash `$exception` reported on the next launch. The buffer rotates only by byte-budget eviction and is not cleared by a capture or an identity change. Configure it on `config.errorTrackingConfig.exceptionSteps` (`enabled`, `maxBytes`).
+
+  ```dart
+  Posthog().addExceptionStep('User tapped Checkout', properties: {'screen': 'cart'});
+  ```
+
+  Requires `posthog-android` and `posthog-ios` versions that support exception steps. On web, steps are forwarded to posthog-js, and exceptions captured via `captureException` now route through posthog-js's `captureException` (instead of a generic `$exception` capture) so steps and other required metadata attach.
+
+## 5.27.0
+
+### Minor Changes
+
+- 647d48b: Add structured logging. Send logs to PostHog from your Flutter app and see them next to your events and session replays.
+
+  ```dart
+  Posthog().logger.info('checkout completed', {'order_id': 'ord_789'});
+  Posthog().logger.error('payment failed', {'error_code': 'E001'});
+
+  // Or pick the level at runtime:
+  await Posthog().captureLog(body: 'request finished', level: PostHogLogSeverity.warn);
+  ```
+
+  Levels: `trace`, `debug`, `info`, `warn`, `error`, `fatal`. Configure service identity, redaction (`beforeSend`), and batching/rate-cap tuning on `config.logsConfig` — all optional, with sensible native defaults. Works on iOS, Android, and web.
+
+  Requires `posthog-android` `3.48.0` or newer.
+
+  See https://posthog.com/docs/logs for details.
+
+## 5.26.0
+
+### Minor Changes
+
+- 4749dd4: Add `setPersonPropertiesForFlags`, `resetPersonPropertiesForFlags`, `setGroupPropertiesForFlags`, and `resetGroupPropertiesForFlags`, bringing the Flutter SDK to parity with the native iOS/Android and JS SDKs.
+
+  These set person/group properties that are sent inline with the next feature flag evaluation request, so flags targeting those properties can be evaluated immediately — without enqueuing a `$set` event or waiting for it to be ingested into the person store. By default they reload feature flags and the returned `Future` completes only after the reload finishes, so the next `getFeatureFlag`/`getFeatureFlagResult` reflects the updated properties. Pass `reloadFeatureFlags: false` to skip the reload.
+
+  ```dart
+  await Posthog().setPersonPropertiesForFlags({
+    "storefront_country": "US",
+    "superwall_demand_score": 88,
+  });
+  final result = await Posthog().getFeatureFlagResult("my_flag");
+  ```
+
+## 5.25.3
+
+### Patch Changes
+
+- 7077816: `reloadFeatureFlags()` now resolves its `Future` only after feature flags have finished loading, instead of returning immediately. `await Posthog().reloadFeatureFlags()` is now reliable, so reading a flag (or starting session recording) right after a reload sees the up-to-date result.
+
+## 5.25.2
+
+### Patch Changes
+
+- 2c0925e: Fix link-type survey questions with no URL silently failing to render on Android. The deserializer now treats a missing link as an empty string instead of throwing on `null`.
+
+## 5.25.1
+
+### Patch Changes
+
+- 06b1569: Skip Flutter SDK setup for blank project tokens before storing config or installing Dart integrations.
+
+## 5.25.0
+
+### Minor Changes
+
+- cfcab97: Support Android builds with AGP 9 built-in Kotlin while preserving compatibility with AGP 8. This release requires Android Gradle Plugin 8.0 or newer.
+
+### Patch Changes
+
+- f9490ed: Raise the minimum `posthog-android` version to 3.44.0 to guarantee session replay minimum recording duration support.
+
 ## 5.24.2
 
 ### Patch Changes
@@ -380,8 +563,8 @@ final observer = PosthogObserver(routeFilter: myRouteFilter);
 - Android minSdkVersion 21
 - iOS min version 13.0
 - Flutter min version 3.3.0
-- Upgraded PostHog Android SDK to [v3](https://github.com/PostHog/posthog-android/blob/main/USAGE.md)
-- Upgraded PostHog iOS SDK to [v3](https://github.com/PostHog/posthog-ios/blob/main/USAGE.md)
+- Upgraded PostHog Android SDK to [v3](https://posthog.com/docs/libraries/android)
+- Upgraded PostHog iOS SDK to [v3](https://posthog.com/docs/libraries/ios/usage)
 - Upgraded PostHog JS SDK to the latest version
 - PostHog Flutter Plugins are written in Kotlin and Swift
 - Added missing features such as feature flags payloads, debug, and more
@@ -421,8 +604,8 @@ final observer = PosthogObserver(routeFilter: myRouteFilter);
 - Android minSdkVersion 21
 - iOS min version 13.0
 - Flutter min version 3.3.0
-- Upgraded PostHog Android SDK to [v3](https://github.com/PostHog/posthog-android/blob/main/USAGE.md)
-- Upgraded PostHog iOS SDK to [v3 preview](https://github.com/PostHog/posthog-ios/blob/main/USAGE.md)
+- Upgraded PostHog Android SDK to [v3](https://posthog.com/docs/libraries/android)
+- Upgraded PostHog iOS SDK to [v3 preview](https://posthog.com/docs/libraries/ios/usage)
 - Upgraded PostHog JS SDK to the latest version
 - PostHog Flutter Plugins are written in Kotlin and Swift
 
