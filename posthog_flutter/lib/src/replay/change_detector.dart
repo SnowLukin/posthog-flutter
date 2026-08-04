@@ -26,6 +26,15 @@ class ChangeDetector {
   bool _isRunning = false;
   Timer? _timer;
 
+  bool hasCapturedPlatformViews = false;
+
+  /// While a native occlusion episode owns the replay, forcing frames would
+  /// make the hidden Flutter tree re-render every tick only for the capture
+  /// to be discarded.
+  bool suppressForcedFrames = false;
+
+  bool get isRunning => _isRunning;
+
   /// Creates a [ChangeDetector] with the given [onChange] callback.
   ///
   /// [interval] controls how often to check for changes.
@@ -62,6 +71,9 @@ class ChangeDetector {
       return;
     }
 
+    if (hasCapturedPlatformViews && !suppressForcedFrames) {
+      WidgetsBinding.instance.scheduleFrame();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_isRunning) {
         onChange();

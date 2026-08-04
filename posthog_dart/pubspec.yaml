@@ -3,6 +3,8 @@ description: PostHog analytics SDK for Dart - core package for product analytics
 version: 0.1.0
 repository: https://github.com/PostHog/posthog-flutter
 
+resolution: workspace
+
 platforms:
   android:
   ios:
