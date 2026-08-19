@@ -1,0 +1,6 @@
+include: package:lints/recommended.yaml
+
+linter:
+  rules:
+    avoid_annotating_with_dynamic: true
+    avoid_dynamic_calls: true

@@ -6,5 +6,6 @@ environment:
 
 workspace:
   - posthog_flutter
+  - posthog_dart
   - example
   - sdk_compliance_adapter
