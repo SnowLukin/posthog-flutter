@@ -19,6 +19,13 @@ Future<void> main() async {
   final config = PostHogConfig(
     'phc_6lqCaCDCBEWdIGieihq5R2dZpPVbAUFISA75vFZow06',
   );
+  // On Windows/Linux there is no native SDK to read app metadata from, so
+  // the host app provides it.
+  config.desktopConfig = PostHogDesktopConfig()
+    ..appName = 'PostHog Flutter Example'
+    ..appVersion = '1.0.0'
+    ..appBuild = '1'
+    ..appNamespace = 'com.posthog.flutter.example';
   config.onFeatureFlags = () {
     debugPrint('[PostHog] Feature flags loaded!');
   };
