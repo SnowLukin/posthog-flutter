@@ -202,6 +202,11 @@ class PostHogConfig {
   /// `Posthog().logger` facade).
   final logsConfig = PostHogLogsConfig();
 
+  /// Configuration for the pure-Dart desktop implementation.
+  ///
+  /// Only used on Windows and Linux; other platforms ignore it.
+  var desktopConfig = PostHogDesktopConfig();
+
   /// Pre-seeded identity and feature-flag state applied on the very first SDK
   /// launch, before any network request completes.
   ///
@@ -785,6 +790,49 @@ class PostHogSessionReplayConfig {
       if (sampleRate != null) 'sampleRate': sampleRate,
     };
   }
+}
+
+/// Configuration for the desktop (Windows/Linux) implementation.
+///
+/// Assign values to [PostHogConfig.desktopConfig] before calling
+/// `Posthog().setup(config)`. Only used on Windows and Linux, where the SDK
+/// runs on a pure-Dart implementation with no manifest to read app metadata
+/// from; other platforms ignore this configuration.
+class PostHogDesktopConfig {
+  /// Creates a desktop configuration with no app metadata.
+  PostHogDesktopConfig();
+
+  /// The application name sent as `$app_name` with every event.
+  ///
+  /// When `null`, the executable name (from `Platform.resolvedExecutable`) is
+  /// sent instead.
+  String? appName;
+
+  /// The application version sent as `$app_version` with every event.
+  ///
+  /// When `null`, the property is omitted.
+  String? appVersion;
+
+  /// The application build number sent as `$app_build` with every event.
+  ///
+  /// When `null`, the property is omitted.
+  String? appBuild;
+
+  /// The application identifier sent as `$app_namespace` with every event,
+  /// e.g. `com.example.counter`. It also scopes the on-disk state directory,
+  /// so set it when several of your apps could share an executable name.
+  ///
+  /// When `null`, the property is omitted and the executable name scopes the
+  /// state directory instead.
+  String? appNamespace;
+
+  /// Overrides the directory where the SDK persists its state (queued events,
+  /// identity, consent, cached feature flags). A per-project-token
+  /// subdirectory is still created inside it.
+  ///
+  /// When `null`, the state lives under the platform's application data root:
+  /// `%APPDATA%` on Windows, `$XDG_DATA_HOME` (or `~/.local/share`) on Linux.
+  String? storageDirectory;
 }
 
 /// Configuration for PostHog error tracking and exception capture.

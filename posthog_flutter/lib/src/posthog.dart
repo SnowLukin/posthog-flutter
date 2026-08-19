@@ -270,6 +270,8 @@ class Posthog {
   ///
   /// Returns a [Future] that completes when the record has been forwarded.
   ///
+  /// **Windows/Linux:** not supported.
+  ///
   /// **Example:**
   /// ```dart
   /// await Posthog().captureLog(
@@ -623,7 +625,7 @@ class Posthog {
   /// a token registered before they are initialized, and this method still
   /// completes without an error.
   ///
-  /// Not supported on Flutter web or macOS.
+  /// Not supported on Flutter web, macOS, Windows or Linux.
   Future<void> registerPushNotificationToken(
     String deviceToken, {
     String? appId,
@@ -638,7 +640,7 @@ class Posthog {
   /// moves a registered token to the new anonymous identity on its own, so this
   /// is only needed when you manage subscriptions yourself.
   ///
-  /// Not supported on Flutter web or macOS.
+  /// Not supported on Flutter web, macOS, Windows or Linux.
   Future<void> unregisterPushNotificationToken() =>
       _posthog.unregisterPushNotificationToken();
 
@@ -672,7 +674,7 @@ class Posthog {
   ///
   /// [subtitle] is iOS only and ignored on Android, which has no such field.
   ///
-  /// Not supported on Flutter web.
+  /// Not supported on Flutter web, Windows or Linux.
   Future<void> capturePushNotificationOpened({
     String? title,
     String? subtitle,
@@ -810,6 +812,8 @@ class Posthog {
   /// - Flutter web: forwarded to posthog-js. Steps attach to exceptions
   ///   captured by posthog-js, but not to exceptions captured via
   ///   [captureException] on web.
+  /// - Windows/Linux: not supported; there is no native SDK, so steps are
+  ///   not recorded on desktop.
   ///
   /// **Example:**
   /// ```dart
@@ -868,6 +872,8 @@ class Posthog {
   /// session. Set it to `false` to start a new session and begin recording.
   ///
   /// Returns a [Future] that completes when the start request has been sent.
+  ///
+  /// **Windows/Linux:** not supported.
   Future<void> startSessionRecording({bool resumeCurrent = true}) async {
     await _posthog.startSessionRecording(resumeCurrent: resumeCurrent);
     PostHogInternalEvents.sessionRecordingActive.value = true;
@@ -878,6 +884,8 @@ class Posthog {
   /// This method will have no effect if PostHog is not enabled.
   ///
   /// Returns a [Future] that completes when the stop request has been sent.
+  ///
+  /// **Windows/Linux:** not supported.
   Future<void> stopSessionRecording() async {
     await _posthog.stopSessionRecording();
     PostHogInternalEvents.sessionRecordingActive.value = false;
@@ -887,6 +895,8 @@ class Posthog {
   ///
   /// Returns `false` when session replay is inactive or unsupported by the
   /// current platform.
+  ///
+  /// **Windows/Linux:** not supported.
   Future<bool> isSessionReplayActive() => _posthog.isSessionReplayActive();
 
   Posthog._internal();
