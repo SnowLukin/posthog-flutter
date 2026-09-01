@@ -73,7 +73,11 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
             personProfiles: _mapPersonProfiles(config.personProfiles),
             beforeSend: _bridgeBeforeSend(config.beforeSend),
           ),
-          storage: pd.FileStorage(_resolveStorageDir(config.projectToken)),
+          storage: pd.FileStorage(
+            _resolveStorageDir(config.projectToken),
+            onError: (message, error) =>
+                printIfDebug('[PostHog] storage: $message ($error)'),
+          ),
         );
         _client = client;
 
@@ -214,9 +218,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
       });
 
   @override
-  Future<Object?> getFeatureFlag({required String key}) =>
-      _guardWith<Object?>(
-          'getFeatureFlag', null, () => _client?.getFeatureFlag(key));
+  Future<Object?> getFeatureFlag({required String key}) => _guardWith<Object?>(
+      'getFeatureFlag', null, () => _client?.getFeatureFlag(key));
 
   @override
   Future<Object?> getFeatureFlagPayload({required String key}) =>
@@ -408,9 +411,8 @@ class PosthogFlutterDart extends PosthogFlutterPlatformInterface {
     }
     // FileStorage creates the directory itself; every fallback must stay
     // scoped or it reopens the shared cross-project store.
-    final base0 = (base != null && base.isNotEmpty)
-        ? base
-        : Directory.systemTemp.path;
+    final base0 =
+        (base != null && base.isNotEmpty) ? base : Directory.systemTemp.path;
     return '$base0${sep}posthog$sep$scope';
   }
 }

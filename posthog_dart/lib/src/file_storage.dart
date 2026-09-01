@@ -23,12 +23,30 @@ import 'storage.dart';
 /// Storage never throws into the host app. While the file is unreadable the
 /// store reports [isDegraded] and drops writes, so a transient failure never
 /// replaces good persisted data.
+/// Reports a persist failure the store recovered from or gave up on.
+typedef FileStorageErrorHandler = void Function(String message, Object error);
+
+/// Renames the written temporary file onto the snapshot path.
+typedef FileRenamer = void Function(File source, String targetPath);
+
 class FileStorage implements PostHogStorage {
   final String _directoryPath;
+  final FileStorageErrorHandler? _onError;
+  final FileRenamer _rename;
   Map<String, Object?>? _cache;
   static const _fileName = 'posthog_data.json';
 
-  FileStorage(this._directoryPath);
+  /// [rename] exists so the antivirus behaviour this store guards against -
+  /// a refused rename - can be exercised on a machine where rename works.
+  FileStorage(
+    this._directoryPath, {
+    FileStorageErrorHandler? onError,
+    FileRenamer rename = _renameFile,
+  })  : _onError = onError,
+        _rename = rename;
+
+  static void _renameFile(File source, String targetPath) =>
+      source.renameSync(targetPath);
 
   String get _filePath => p.join(_directoryPath, _fileName);
 
@@ -92,10 +110,45 @@ class FileStorage implements PostHogStorage {
       // Atomic replace: a crash mid-write must not truncate the snapshot.
       final tmp = File('$_filePath.tmp');
       tmp.writeAsStringSync(jsonEncode(data), flush: true);
-      tmp.renameSync(_filePath);
-    } catch (_) {
+      _replace(tmp);
+    } catch (e) {
       // Best effort: the cache keeps the new value, the next successful
-      // write persists the whole snapshot.
+      // write persists the whole snapshot. Reported because a store that
+      // silently stops persisting looks exactly like one that works.
+      _onError?.call('failed to persist to $_filePath', e);
+    }
+  }
+
+  /// Moves the written temporary file onto the snapshot path.
+  ///
+  /// Rename is the atomic path. Some antivirus products hold a file open
+  /// while scanning it and refuse the rename to the calling process while
+  /// still allowing a copy; without the fallback such a machine never
+  /// persists anything again. The copy is not atomic, so its result is
+  /// size-checked before the temporary file goes away.
+  void _replace(File tmp) {
+    try {
+      _rename(tmp, _filePath);
+
+      return;
+    } on FileSystemException catch (e) {
+      _onError?.call('rename refused, copying to $_filePath instead', e);
+    }
+
+    final expectedLength = tmp.lengthSync();
+    tmp.copySync(_filePath);
+    final actualLength = File(_filePath).lengthSync();
+    if (actualLength != expectedLength) {
+      throw FileSystemException(
+        'copy truncated: expected $expectedLength bytes, got $actualLength',
+        _filePath,
+      );
+    }
+
+    try {
+      tmp.deleteSync();
+    } on FileSystemException {
+      // Leftover temporary file is overwritten by the next write.
     }
   }
 
