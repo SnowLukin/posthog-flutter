@@ -216,7 +216,6 @@ abstract class PostHogCoreStateless {
     };
   }
 
-
   @protected
   void identifyStateless(
     String distinctId, {
@@ -295,8 +294,6 @@ abstract class PostHogCoreStateless {
     });
   }
 
-
-
   @protected
   Future<GetFlagsResult> getFlags(
     String distinctId, {
@@ -356,8 +353,6 @@ abstract class PostHogCoreStateless {
         type: FeatureFlagRequestErrorType.unknownError);
   }
 
-
-
   // No memoization: storage already caches in memory, and a second cache
   // layer would go stale when the store changes underneath.
   @protected
@@ -385,7 +380,6 @@ abstract class PostHogCoreStateless {
       setPersistedProperty(PostHogPersistedProperty.props, updated);
     });
   }
-
 
   /// Hook for subclasses to transform or filter a message before queueing.
   @protected

@@ -19,14 +19,12 @@ void main() {
           isNull);
 
       storage.setProperty(PostHogPersistedProperty.distinctId, 'id-1');
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'id-1');
 
       // The value made it to disk, not just into the in-memory cache.
       storage.clearCache();
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'id-1');
     });
 
@@ -48,17 +46,18 @@ void main() {
           returnsNormally);
       // Consent/queue updates must survive the session even if the disk
       // write failed - the next successful write persists the snapshot.
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'b');
 
       Process.runSync('chmod', ['755', dir.path]);
       storage.setProperty(PostHogPersistedProperty.sessionId, 's');
       storage.clearCache();
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'b');
-    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
+    },
+        skip: Platform.isWindows
+            ? 'simulates IO failures via POSIX chmod'
+            : false);
 
     test('invalid UTF-8 resets the store instead of bricking it', () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_utf8');
@@ -69,15 +68,13 @@ void main() {
 
       final storage = FileStorage(dir.path);
       expect(storage.isDegraded, isFalse);
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
 
       // Self-heal: the next write persists a fresh valid snapshot.
       storage.setProperty(PostHogPersistedProperty.distinctId, 'healed');
       storage.clearCache();
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
           'healed');
     });
 
@@ -88,18 +85,14 @@ void main() {
 
       storage.setProperty<Object>(PostHogPersistedProperty.queue, 'garbage');
 
-      expect(
-          storage
-              .getProperty<List<Object?>>(PostHogPersistedProperty.queue),
+      expect(storage.getProperty<List<Object?>>(PostHogPersistedProperty.queue),
           isNull);
-      expect(
-          storage.getProperty<String>(PostHogPersistedProperty.queue),
+      expect(storage.getProperty<String>(PostHogPersistedProperty.queue),
           'garbage');
 
       final memory = InMemoryStorage();
       memory.setProperty<Object>(PostHogPersistedProperty.distinctId, 42);
-      expect(
-          memory.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(memory.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
     });
 
@@ -119,21 +112,41 @@ void main() {
       final blind = FileStorage(dir.path);
       expect(blind.isDegraded, isTrue);
       expect(
-          () => blind.setProperty(
-              PostHogPersistedProperty.distinctId, 'clobber'),
+          () =>
+              blind.setProperty(PostHogPersistedProperty.distinctId, 'clobber'),
           returnsNormally);
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
 
       Process.runSync('chmod', ['644', dataFile]);
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           'keep');
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.sessionId),
+      expect(blind.getProperty<String>(PostHogPersistedProperty.sessionId),
           'sess');
-    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
+    },
+        skip: Platform.isWindows
+            ? 'simulates IO failures via POSIX chmod'
+            : false);
+
+    test('refused rename falls back to copy and reports it', () {
+      final dir = Directory.systemTemp.createTempSync('posthog_storage_rn');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final reports = <String>[];
+      final storage = FileStorage(
+        dir.path,
+        onError: (message, error) => reports.add(message),
+        rename: (source, targetPath) => throw const FileSystemException(
+            'rename refused by antivirus', '', OSError('', 17)),
+      );
+
+      storage.setProperty(PostHogPersistedProperty.distinctId, 'id-1');
+
+      storage.clearCache();
+      expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
+          'id-1');
+      expect(File('${dir.path}/posthog_data.json.tmp').existsSync(), isFalse);
+      expect(reports.single, contains('rename refused'));
+    });
 
     test('unreadable directory is degraded, not a fresh store', () {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_dir');
@@ -149,14 +162,15 @@ void main() {
 
       final blind = FileStorage(sub.path);
       expect(blind.isDegraded, isTrue);
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
 
       Process.runSync('chmod', ['755', sub.path]);
-      expect(
-          blind.getProperty<String>(PostHogPersistedProperty.distinctId),
+      expect(blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           'keep');
-    }, skip: Platform.isWindows ? 'simulates IO failures via POSIX chmod' : false);
+    },
+        skip: Platform.isWindows
+            ? 'simulates IO failures via POSIX chmod'
+            : false);
   });
 }

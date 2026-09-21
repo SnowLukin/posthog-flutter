@@ -434,5 +434,4 @@ void main() {
       expect(parsePayload('not-json{'), 'not-json{');
     });
   });
-
 }

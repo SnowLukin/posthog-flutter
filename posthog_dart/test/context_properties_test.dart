@@ -14,8 +14,7 @@ class ContextTestClient extends TestClient {
 }
 
 Map<String, Object?> queuedProps(PostHogStorage storage) {
-  final message =
-      getQueue(storage).single['message']! as Map<String, Object?>;
+  final message = getQueue(storage).single['message']! as Map<String, Object?>;
   return message['properties']! as Map<String, Object?>;
 }
 
