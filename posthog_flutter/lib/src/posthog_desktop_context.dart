@@ -82,7 +82,12 @@ String _osName() {
 /// BCP-47 tag ("en-US") like the Android and web SDKs; the POSIX codeset
 /// suffix Linux appends ("en_US.UTF-8") is stripped.
 String _locale() {
-  return Platform.localeName.split('.').first.split('@').first.replaceAll('_', '-');
+  return Platform.localeName
+      .split('.')
+      .first
+      .split('@')
+      .first
+      .replaceAll('_', '-');
 }
 
 /// Screen size in logical pixels (the mobile SDKs report dp/points).

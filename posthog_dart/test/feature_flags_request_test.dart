@@ -32,7 +32,8 @@ void main() {
 
       final body =
           jsonDecode(flagsCalls.last.options.body!) as Map<String, Object?>;
-      final personProperties = body['person_properties'] as Map<String, Object?>;
+      final personProperties =
+          body['person_properties'] as Map<String, Object?>;
       expect(personProperties['age'], 30);
       expect(personProperties['beta'], true);
       expect(personProperties['plan'], 'pro');

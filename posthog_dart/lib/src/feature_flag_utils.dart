@@ -40,4 +40,3 @@ Object? parsePayload(Object? response) {
     return response;
   }
 }
-

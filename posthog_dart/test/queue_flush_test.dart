@@ -49,8 +49,7 @@ void main() {
           const PostHogFetchResponse(status: 500, body: 'oops');
 
       client.capture('evt');
-      await expectLater(
-          client.flush(), throwsA(isA<PostHogFetchHttpError>()));
+      await expectLater(client.flush(), throwsA(isA<PostHogFetchHttpError>()));
 
       expect(client.fetchCalls, hasLength(2));
       expect(getQueue(storage), hasLength(1));
@@ -64,8 +63,7 @@ void main() {
           const PostHogFetchResponse(status: 400, body: 'bad');
 
       client.capture('evt');
-      await expectLater(
-          client.flush(), throwsA(isA<PostHogFetchHttpError>()));
+      await expectLater(client.flush(), throwsA(isA<PostHogFetchHttpError>()));
 
       expect(client.fetchCalls, hasLength(1));
       expect(getQueue(storage), isEmpty);
@@ -74,8 +72,7 @@ void main() {
     test('failed flush re-arms the periodic timer', () async {
       final storage = InMemoryStorage();
       final client = TestClient('k',
-          options:
-              testOptions(flushInterval: const Duration(milliseconds: 50)),
+          options: testOptions(flushInterval: const Duration(milliseconds: 50)),
           storage: storage);
       var failures = 0;
       client.fetchHandler = (url, options) {
@@ -109,9 +106,8 @@ void main() {
       client.capture('evt');
 
       final props = getQueue(storage)
-          .map((item) =>
-              (item as Map)['message'] as Map<String, Object?>)
-          .lastWhere((m) => m['event'] == 'evt')['properties']
+              .map((item) => (item as Map)['message'] as Map<String, Object?>)
+              .lastWhere((m) => m['event'] == 'evt')['properties']
           as Map<String, Object?>;
       expect(props['external'], true);
     });

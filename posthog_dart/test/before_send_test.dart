@@ -4,8 +4,7 @@ import 'package:test/test.dart';
 import 'test_client.dart';
 
 Map<String, Object?> queuedProps(PostHogStorage storage, int index) {
-  final message =
-      getQueue(storage)[index]['message'] as Map<String, Object?>;
+  final message = getQueue(storage)[index]['message'] as Map<String, Object?>;
   return message['properties'] as Map<String, Object?>;
 }
 

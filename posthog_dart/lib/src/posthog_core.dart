@@ -194,7 +194,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
         getAnonymousId();
   }
 
-
   /// Identifies a user with a distinct ID and optional properties.
   void identify(String? distinctId,
       {Map<String, Object?>? properties, PostHogCaptureOptions? options}) {
@@ -555,7 +554,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
     });
   }
 
-
   /// Gets the result for a specific feature flag.
   PostHogFeatureFlagResult? getFeatureFlagResult(String key,
       {PostHogFeatureFlagResultOptions? options}) {
@@ -721,7 +719,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
       }
     });
   }
-
 
   bool _isIdentified() {
     final personMode =
@@ -891,8 +888,8 @@ abstract class PostHogCore extends PostHogCoreStateless {
             "Error in beforeSend callback for event '${event.event}':", e);
       }
       if (result == null) {
-        logger.info(
-            "Event '${event.event}' was rejected in beforeSend callback");
+        logger
+            .info("Event '${event.event}' was rejected in beforeSend callback");
         return null;
       }
     }
