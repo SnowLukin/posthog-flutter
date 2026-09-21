@@ -6,6 +6,12 @@ import 'package:path/path.dart' as p;
 import 'persistence.dart';
 import 'storage.dart';
 
+/// Reports a persist failure the store recovered from or gave up on.
+typedef FileStorageErrorHandler = void Function(String message, Object error);
+
+/// Renames the written temporary file onto the snapshot path.
+typedef FileRenamer = void Function(File source, String targetPath);
+
 /// File-based storage implementation.
 ///
 /// Stores all persisted properties as a single JSON file on disk.
@@ -23,12 +29,6 @@ import 'storage.dart';
 /// Storage never throws into the host app. While the file is unreadable the
 /// store reports [isDegraded] and drops writes, so a transient failure never
 /// replaces good persisted data.
-/// Reports a persist failure the store recovered from or gave up on.
-typedef FileStorageErrorHandler = void Function(String message, Object error);
-
-/// Renames the written temporary file onto the snapshot path.
-typedef FileRenamer = void Function(File source, String targetPath);
-
 class FileStorage implements PostHogStorage {
   final String _directoryPath;
   final FileStorageErrorHandler? _onError;
