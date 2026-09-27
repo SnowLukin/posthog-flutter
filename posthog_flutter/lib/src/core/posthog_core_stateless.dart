@@ -20,8 +20,10 @@ class PostHogFetchHttpError implements Exception {
   final int status;
   final String responseBody;
   final int reqByteLength;
+  final Duration? retryAfter;
 
-  PostHogFetchHttpError(this.status, this.responseBody, this.reqByteLength);
+  PostHogFetchHttpError(this.status, this.responseBody, this.reqByteLength,
+      {this.retryAfter});
 
   @override
   String toString() => 'PostHogFetchHttpError: status=$status, '
@@ -85,6 +87,7 @@ abstract class PostHogCoreStateless {
   @protected
   late final SimpleEventEmitter events;
   Timer? _flushTimer;
+  Timer? _retryAfterTimer;
   Future<void>? _flushFuture;
 
   /// Set by [close]: later calls are ignored, the periodic flush stops, and
@@ -118,9 +121,15 @@ abstract class PostHogCoreStateless {
       debug(true);
     }
 
+    final queue = storage.queue;
+    final overflow = queue.length - _maxQueueSize;
+    if (overflow > 0) {
+      queue.removeOldest(overflow);
+    }
+
     // Events left over from a previous run go out with the first periodic
     // flush instead of waiting for the next capture.
-    if (storage.queue.length > 0) {
+    if (queue.length > 0) {
       _scheduleFlush();
     }
   }
@@ -429,7 +438,10 @@ abstract class PostHogCoreStateless {
       };
 
   void _scheduleFlush() {
-    if (_flushInterval > Duration.zero && _flushTimer == null) {
+    if (!_closed &&
+        _retryAfterTimer == null &&
+        _flushInterval > Duration.zero &&
+        _flushTimer == null) {
       _flushTimer = Timer(_flushInterval, () {
         // Cleared first: a timer firing during a flush in flight only joins
         // that flush, and a stale reference would block every later re-arm.
@@ -444,6 +456,20 @@ abstract class PostHogCoreStateless {
     _flushTimer = null;
   }
 
+  void _pauseFlush(Duration delay) {
+    _clearFlushTimer();
+    _retryAfterTimer?.cancel();
+    _retryAfterTimer =
+        Timer(delay < _fetchRetryDelay ? _fetchRetryDelay : delay, () {
+      _retryAfterTimer = null;
+      if (!_closed &&
+          _flushInterval > Duration.zero &&
+          storage.queue.length > 0) {
+        _flushBackground();
+      }
+    });
+  }
+
   void _flushBackground() {
     flush().catchError((e) {
       logger.error('Error while flushing PostHog', e);
@@ -455,6 +481,7 @@ abstract class PostHogCoreStateless {
   /// concurrent flushes sending duplicate events.
   Future<void> flush() {
     if (_flushFuture != null) return _flushFuture!;
+    if (_retryAfterTimer != null) return Future.value();
     _flushFuture = _doFlush().whenComplete(() => _flushFuture = null);
     return _flushFuture!;
   }
@@ -482,7 +509,7 @@ abstract class PostHogCoreStateless {
       final url = '$_host/batch/';
 
       try {
-        await _fetchWithRetry(url, payload);
+        await _fetchWithRetry(url, payload, honorRetryAfter: true);
       } catch (e) {
         // A client closed meanwhile leaves the queue to the next one.
         if (_closed) rethrow;
@@ -499,7 +526,13 @@ abstract class PostHogCoreStateless {
         }
         // Re-arm the periodic flush: otherwise queued events sit until the
         // next capture (forever in an idle app after an offline failure).
-        _scheduleFlush();
+        if (_isTransientFetchError(e) &&
+            e is PostHogFetchHttpError &&
+            e.retryAfter != null) {
+          _pauseFlush(e.retryAfter!);
+        } else {
+          _scheduleFlush();
+        }
         events.emit('error', e);
         rethrow;
       }
@@ -523,10 +556,11 @@ abstract class PostHogCoreStateless {
     int retryCount = _fetchRetryCount,
     Duration retryDelay = _fetchRetryDelay,
     bool Function(Object error) retryCheck = _isTransientFetchError,
+    bool honorRetryAfter = false,
   }) async {
     return retriable(
       () async {
-        final ({int status, String body}) response;
+        final ({int status, String body, Duration? retryAfter}) response;
         try {
           response = await _fetch(url, body).timeout(_requestTimeout);
         } catch (e) {
@@ -538,17 +572,40 @@ abstract class PostHogCoreStateless {
             response.status,
             response.body,
             body.length,
+            retryAfter: response.retryAfter,
           );
         }
         return response.body;
       },
       retryCount: retryCount,
       retryDelay: retryDelay,
-      retryCheck: (error) => !_closed && retryCheck(error),
+      retryCheck: (error) =>
+          !_closed &&
+          retryCheck(error) &&
+          !(honorRetryAfter &&
+              error is PostHogFetchHttpError &&
+              error.retryAfter != null),
     );
   }
 
-  Future<({int status, String body})> _fetch(String url, String body) async {
+  static Duration? _parseRetryAfter(String? value) {
+    if (value == null) return null;
+    final seconds = int.tryParse(value.trim());
+    final Duration delay;
+    if (seconds != null) {
+      delay = Duration(seconds: seconds);
+    } else {
+      try {
+        delay = HttpDate.parse(value).difference(DateTime.now().toUtc());
+      } on HttpException {
+        return null;
+      }
+    }
+    return delay > Duration.zero ? delay : null;
+  }
+
+  Future<({int status, String body, Duration? retryAfter})> _fetch(
+      String url, String body) async {
     final request = await _httpClient.postUrl(Uri.parse(url));
     // A redirect is reported rather than followed, so a redirected batch is
     // not taken for delivered.
@@ -569,7 +626,12 @@ abstract class PostHogCoreStateless {
     final responseBody = await response
         .transform(const Utf8Decoder(allowMalformed: true))
         .join();
-    return (status: response.statusCode, body: responseBody);
+    return (
+      status: response.statusCode,
+      body: responseBody,
+      retryAfter: _parseRetryAfter(
+          response.headers.value(HttpHeaders.retryAfterHeader)),
+    );
   }
 
   /// Closes the client without sending anything: stops the periodic flush,
@@ -578,6 +640,8 @@ abstract class PostHogCoreStateless {
   void close() {
     _closed = true;
     _clearFlushTimer();
+    _retryAfterTimer?.cancel();
+    _retryAfterTimer = null;
     _httpClient.close(force: true);
     storage.close();
   }

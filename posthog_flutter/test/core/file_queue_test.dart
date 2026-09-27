@@ -75,6 +75,60 @@ void main() {
     });
   });
 
+  test('ограничивает восстановленную очередь до первого таймера без capture',
+      () {
+    final before = client();
+    for (var i = 0; i < 5; i++) {
+      before.capture('event_$i');
+    }
+    final original = [
+      for (final file in _queueFiles(dir).skip(3))
+        jsonDecode(file.readAsStringSync()),
+    ];
+    before.close();
+
+    final api = InProcessPostHogApi();
+    fakeAsync((async) {
+      testClient(api,
+          config: testConfig(maxQueueSize: 2, flushAt: 1),
+          storage: FileStorage(dir.path));
+      expect([for (final file in _queueFiles(dir)) _eventOf(file)],
+          ['event_3', 'event_4']);
+      expect(api.requests, isEmpty);
+      async.elapse(const Duration(seconds: 30));
+      expect(api.batchRequests.single.events, original);
+      expect(_queueFiles(dir), isEmpty);
+    });
+  });
+
+  for (final (capacity, remaining) in [(5, 3), (3, 3), (0, 1)]) {
+    test('восстанавливает $remaining событий при maxQueueSize $capacity',
+        () async {
+      final before = client();
+      for (var i = 0; i < 3; i++) {
+        before.capture('event_$i');
+      }
+      before.close();
+      await client(config: testConfig(maxQueueSize: capacity)).flush();
+      expect(server.eventNames,
+          [for (var i = 3 - remaining; i < 3; i++) 'event_$i']);
+    });
+  }
+
+  test('восстановление вторичной очереди не удаляет события основной',
+      () async {
+    final primary = client();
+    primary.capture('first');
+    primary.capture('second');
+    final secondary = client(config: testConfig(maxQueueSize: 1));
+    secondary.capture('secondary');
+    await secondary.flush();
+    expect([for (final file in _queueFiles(dir)) _eventOf(file)],
+        ['first', 'second']);
+    await primary.flush();
+    expect(server.eventNames, ['secondary', 'first', 'second']);
+  });
+
   test('deletes a queued event that cannot be read and sends the others',
       () async {
     final before = client();

@@ -57,6 +57,19 @@ void main() {
       expect(target.requests, isEmpty);
     });
 
+    test('учитывает Retry-After из HTTP без ожидания внутри flush', () async {
+      final client = testClient(server);
+      server.respond = (_) => const PostHogResponse(HttpStatus.tooManyRequests,
+          headers: {'Retry-After': '120'});
+      client.capture('event');
+
+      await expectLater(client.flush().timeout(const Duration(seconds: 2)),
+          throwsA(isA<PostHogFetchHttpError>()));
+      await client.flush();
+
+      expect(server.batchRequests, hasLength(1));
+    });
+
     test('report a refused connection as a connection error', () async {
       final closed = await LocalPostHogServer.start();
       await closed.close();

@@ -15,12 +15,14 @@ void main() {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_null');
       addTearDown(() => dir.deleteSync(recursive: true));
       final storage = FileStorage(dir.path);
+      addTearDown(storage.close);
       storage.setProperty(PostHogPersistedProperty.distinctId, 'user-1');
       storage.setProperty(PostHogPersistedProperty.anonymousId, 'anon-1');
 
       storage.setProperty(PostHogPersistedProperty.distinctId, null);
 
       final reopened = FileStorage(dir.path);
+      addTearDown(reopened.close);
       expect(reopened.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);
       expect(reopened.getProperty<String>(PostHogPersistedProperty.anonymousId),
@@ -31,10 +33,12 @@ void main() {
       final dir = Directory.systemTemp.createTempSync('posthog_storage_type');
       addTearDown(() => dir.deleteSync(recursive: true));
 
-      FileStorage(dir.path)
-          .setProperty<Object>(PostHogPersistedProperty.props, 'garbage');
+      final storage = FileStorage(dir.path);
+      addTearDown(storage.close);
+      storage.setProperty<Object>(PostHogPersistedProperty.props, 'garbage');
 
       final reopened = FileStorage(dir.path);
+      addTearDown(reopened.close);
       expect(
           reopened.getProperty<Map<String, Object?>>(
               PostHogPersistedProperty.props),
@@ -47,6 +51,7 @@ void main() {
       final dir = Directory.systemTemp.createTempSync('posthog_storage');
       addTearDown(() => dir.deleteSync(recursive: true));
       final storage = FileStorage(dir.path);
+      addTearDown(storage.close);
 
       storage.setProperty(
           PostHogPersistedProperty.props, {'date': DateTime.now()});
@@ -60,9 +65,9 @@ void main() {
 
       // The store keeps working after the rejected write.
       storage.setProperty(PostHogPersistedProperty.distinctId, 'id-1');
-      expect(
-          FileStorage(dir.path)
-              .getProperty<String>(PostHogPersistedProperty.distinctId),
+      final reopened = FileStorage(dir.path);
+      addTearDown(reopened.close);
+      expect(reopened.getProperty<String>(PostHogPersistedProperty.distinctId),
           'id-1');
     });
 
@@ -87,6 +92,7 @@ void main() {
         File('${dir.path}/posthog_data.json').writeAsBytesSync(bytes);
 
         final storage = FileStorage(dir.path);
+        addTearDown(storage.close);
         expect(storage.isDegraded, isFalse);
         expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
             isNull,
@@ -95,9 +101,10 @@ void main() {
 
         // Self-heal: the next write persists a fresh valid snapshot.
         storage.setProperty(PostHogPersistedProperty.distinctId, 'healed');
+        final reopened = FileStorage(dir.path);
+        addTearDown(reopened.close);
         expect(
-            FileStorage(dir.path)
-                .getProperty<String>(PostHogPersistedProperty.distinctId),
+            reopened.getProperty<String>(PostHogPersistedProperty.distinctId),
             'healed');
       });
     }
@@ -118,14 +125,16 @@ void main() {
         File('${dir.path}/posthog_data.json').writeAsStringSync(content);
 
         final storage = FileStorage(dir.path);
+        addTearDown(storage.close);
         expect(storage.isDegraded, isFalse);
         expect(storage.getProperty<String>(PostHogPersistedProperty.distinctId),
             isNull);
 
         storage.setProperty(PostHogPersistedProperty.distinctId, 'healed');
+        final reopened = FileStorage(dir.path);
+        addTearDown(reopened.close);
         expect(
-            FileStorage(dir.path)
-                .getProperty<String>(PostHogPersistedProperty.distinctId),
+            reopened.getProperty<String>(PostHogPersistedProperty.distinctId),
             'healed');
       });
     }
@@ -137,6 +146,7 @@ void main() {
         dir.deleteSync(recursive: true);
       });
       final storage = FileStorage(dir.path);
+      addTearDown(storage.close);
       storage.setProperty(PostHogPersistedProperty.distinctId, 'a');
 
       // Snapshots go through tmp+rename, so blocking the write means
@@ -152,9 +162,9 @@ void main() {
       chmod('755', dir.path);
       storage.setProperty(PostHogPersistedProperty.anonymousId, 'anon');
       // The next successful write persists the whole snapshot, 'b' included.
-      expect(
-          FileStorage(dir.path)
-              .getProperty<String>(PostHogPersistedProperty.distinctId),
+      final reopened = FileStorage(dir.path);
+      addTearDown(reopened.close);
+      expect(reopened.getProperty<String>(PostHogPersistedProperty.distinctId),
           'b');
     }, skip: chmodSkip);
 
@@ -165,14 +175,15 @@ void main() {
         dir.deleteSync(recursive: true);
       });
       final storage = FileStorage(dir.path);
+      addTearDown(storage.close);
       storage.setProperty(PostHogPersistedProperty.distinctId, 'a');
 
       chmod('555', dir.path);
       storage.setProperty(PostHogPersistedProperty.distinctId, 'b');
 
-      expect(
-          FileStorage(dir.path)
-              .getProperty<String>(PostHogPersistedProperty.distinctId),
+      final reopened = FileStorage(dir.path);
+      addTearDown(reopened.close);
+      expect(reopened.getProperty<String>(PostHogPersistedProperty.distinctId),
           'a',
           reason: 'the data file itself stayed writable, so an in-place '
               'write (instead of tmp+rename) would have replaced the good '
@@ -187,6 +198,7 @@ void main() {
       });
       final storage = FileStorage(dir.path)
         ..logger = CoreLogger((log) => log());
+      addTearDown(storage.close);
       storage.setProperty(PostHogPersistedProperty.distinctId, 'a');
       chmod('555', dir.path);
 
@@ -223,7 +235,9 @@ void main() {
         chmod('644', dataFile);
         dir.deleteSync(recursive: true);
       });
-      FileStorage(dir.path)
+      final storage = FileStorage(dir.path);
+      addTearDown(storage.close);
+      storage
         ..setProperty(PostHogPersistedProperty.distinctId, 'keep')
         ..setProperty(PostHogPersistedProperty.anonymousId, 'anon')
         ..close();
@@ -258,12 +272,14 @@ void main() {
         chmod('755', sub.path);
         dir.deleteSync(recursive: true);
       });
-      FileStorage(sub.path)
-          .setProperty(PostHogPersistedProperty.distinctId, 'keep');
+      final storage = FileStorage(sub.path);
+      addTearDown(storage.close);
+      storage.setProperty(PostHogPersistedProperty.distinctId, 'keep');
 
       chmod('000', sub.path);
 
       final blind = FileStorage(sub.path);
+      addTearDown(blind.close);
       expect(blind.isDegraded, isTrue);
       expect(blind.getProperty<String>(PostHogPersistedProperty.distinctId),
           isNull);

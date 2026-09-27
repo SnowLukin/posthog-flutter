@@ -1,16 +1,22 @@
+import 'dart:ffi';
 import 'dart:io';
 
-/// The IANA name of the local time zone, such as `Europe/Berlin`.
-///
-/// Only available on Linux: Windows names its zones differently ("W. Europe
-/// Standard Time"), and translating them takes a mapping table.
+import 'util/logging.dart';
+
+/// Локальный часовой пояс в формате IANA, например `Europe/Berlin`.
 class DesktopTimeZone {
-  /// Reads the zone from `TZ` in [environment], or else from the target of
-  /// `/etc/localtime`. Null on Windows and when neither names a zone.
+  /// Читает `TZ`, затем системный пояс. Если его нельзя определить, вернёт null.
   static String? read(Map<String, String> environment) {
-    if (Platform.isWindows) return null;
     final fromVariable = fromTzVariable(environment['TZ']);
     if (fromVariable != null) return fromVariable;
+    if (Platform.isWindows) {
+      try {
+        return _WindowsTimeZone.read();
+      } catch (e) {
+        printIfDebug('[PostHog] Could not read the Windows time zone: $e');
+        return null;
+      }
+    }
     try {
       return fromZoneInfoPath(
         File('/etc/localtime').resolveSymbolicLinksSync(),
@@ -52,4 +58,44 @@ class DesktopTimeZone {
     r'^([A-Za-z][A-Za-z._+-]*(/[A-Za-z._+-]+)*|(Etc/)?GMT[+-]?\d{1,2}|'
     r'EST5EDT|CST6CDT|MST7MDT|PST8PDT)$',
   );
+}
+
+abstract final class _WindowsTimeZone {
+  static String? read() {
+    const capacity = 256;
+    final memory = _allocate(capacity * 2 + sizeOf<Int32>());
+    if (memory.address == 0) return null;
+    try {
+      final result = memory.cast<Uint16>();
+      final directoryLength = _getSystemDirectory(result, capacity);
+      if (directoryLength == 0 || directoryLength >= capacity) return null;
+      final directory =
+          String.fromCharCodes(result.asTypedList(directoryLength));
+      // Системная ICU хранит соответствия Windows/IANA; своя таблица устаревает.
+      // https://learn.microsoft.com/windows/win32/intl/international-components-for-unicode--icu-
+      final getDefaultTimeZone = DynamicLibrary.open('$directory\\icu.dll')
+          .lookupFunction<
+              Int32 Function(Pointer<Uint16>, Int32, Pointer<Int32>),
+              int Function(Pointer<Uint16>, int, Pointer<Int32>)>(
+        'ucal_getDefaultTimeZone',
+      );
+      final status = (memory.cast<Uint8>() + capacity * 2).cast<Int32>();
+      status.value = 0;
+      final length = getDefaultTimeZone(result, capacity, status);
+      if (status.value > 0 || length <= 0 || length >= capacity) return null;
+      final zone = String.fromCharCodes(result.asTypedList(length));
+      return zone == 'Etc/Unknown' ? null : zone;
+    } finally {
+      _free(memory);
+    }
+  }
+
+  static final _getSystemDirectory = DynamicLibrary.open('kernel32.dll')
+      .lookupFunction<Uint32 Function(Pointer<Uint16>, Uint32),
+          int Function(Pointer<Uint16>, int)>('GetSystemDirectoryW');
+  static final _ole32 = DynamicLibrary.open('ole32.dll');
+  static final _allocate = _ole32.lookupFunction<Pointer<Void> Function(IntPtr),
+      Pointer<Void> Function(int)>('CoTaskMemAlloc');
+  static final _free = _ole32.lookupFunction<Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('CoTaskMemFree');
 }

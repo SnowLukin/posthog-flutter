@@ -246,6 +246,276 @@ void main() {
     });
   });
 
+  group('Retry-After', () {
+    for (final status in [429, 503]) {
+      test(
+          'HTTP $status приостанавливает все способы отправки и возобновляет очередь',
+          () {
+        final api = InProcessPostHogApi();
+        final storage = tempStorage();
+        fakeAsync((async) {
+          api.respond =
+              (_) => PostHogResponse(status, headers: {'Retry-After': '120'});
+          final client =
+              testClient(api, config: testConfig(flushAt: 2), storage: storage);
+          Object? error;
+          client.capture('first');
+          client.flush().catchError((Object e) {
+            error = e;
+          });
+          async.elapse(Duration.zero);
+
+          expect(error, isA<PostHogFetchHttpError>(),
+              reason: 'flush не должен ждать истечения серверной паузы');
+          final original = api.events.single;
+          api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+          client.capture('second');
+          client.flush();
+          client.flush();
+          async.elapse(const Duration(seconds: 119));
+          expect(api.batchRequests, hasLength(1));
+          expect(queuedEvents(storage), ['first', 'second']);
+
+          async.elapse(const Duration(seconds: 1));
+          expect(api.batchRequests, hasLength(2));
+          expect(api.batchRequests.last.eventNames, ['first', 'second']);
+          expect(api.batchRequests.last.events.first['uuid'], original['uuid']);
+          expect(api.batchRequests.last.events.first['timestamp'],
+              original['timestamp']);
+          expect(getQueue(storage), isEmpty);
+
+          client.capture('third');
+          client.capture('fourth');
+          async.elapse(Duration.zero);
+          expect(api.batchRequests, hasLength(3),
+              reason: 'после успеха старая пауза не действует');
+        });
+      });
+    }
+
+    for (final header in [
+      'invalid',
+      '-1',
+      '0',
+      '',
+      'Sun, 06 Nov 1994 08:49:37 GMT',
+    ]) {
+      test('игнорирует Retry-After "$header" и сохраняет три повтора', () {
+        final api = InProcessPostHogApi()
+          ..respond = (_) => PostHogResponse(HttpStatus.serviceUnavailable,
+              headers: {'retry-after': header});
+        fakeAsync((async) {
+          final client = testClient(api);
+          Object? error;
+          client.capture('event');
+          client.flush().catchError((Object e) {
+            error = e;
+          });
+          async.elapse(const Duration(seconds: 9));
+          expect(error, isA<PostHogFetchHttpError>());
+          expect(api.batchRequests, hasLength(4));
+        });
+      });
+    }
+
+    test('принимает HTTP-date и не отправляет раньше указанного срока', () {
+      final api = InProcessPostHogApi()
+        ..respond =
+            (_) => PostHogResponse(HttpStatus.serviceUnavailable, headers: {
+                  'retry-after': HttpDate.format(
+                      DateTime.now().toUtc().add(const Duration(seconds: 120)))
+                });
+      fakeAsync((async) {
+        final client = testClient(api);
+        Object? error;
+        client.capture('event');
+        client.flush().catchError((Object e) {
+          error = e;
+        });
+        async.elapse(Duration.zero);
+        expect(error, isA<PostHogFetchHttpError>());
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        async.elapse(const Duration(seconds: 118));
+        expect(api.batchRequests, hasLength(1));
+        async.elapse(const Duration(seconds: 2));
+        expect(api.batchRequests, hasLength(2));
+      });
+    });
+
+    test('не повторяет окончательную ошибку из-за заголовка', () {
+      final api = InProcessPostHogApi()
+        ..respond = (_) => const PostHogResponse(HttpStatus.badRequest,
+            headers: {'retry-after': '120'});
+      final storage = tempStorage();
+      fakeAsync((async) {
+        final client = testClient(api, storage: storage);
+        client.capture('invalid');
+        client.flush().catchError((Object _) {});
+        async.elapse(Duration.zero);
+        expect(getQueue(storage), isEmpty);
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        client.capture('valid');
+        client.flush();
+        async.elapse(Duration.zero);
+        expect(api.eventNames, ['invalid', 'valid']);
+      });
+    });
+
+    test('сохраняет паузу при смене согласия и сбросе идентичности', () {
+      final api = InProcessPostHogApi()
+        ..respond = (_) => const PostHogResponse(HttpStatus.tooManyRequests,
+            headers: {'retry-after': '120'});
+      fakeAsync((async) {
+        final client = testClient(api);
+        final previousId = client.getDistinctId();
+        client.capture('before');
+        client.flush().catchError((Object _) {});
+        async.elapse(Duration.zero);
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        client.optOut();
+        client.optIn();
+        client.reset();
+        final nextId = client.getDistinctId();
+        expect(nextId, isNot(previousId));
+        client.capture('after');
+        client.flush();
+        async.elapse(const Duration(seconds: 119));
+        expect(api.batchRequests, hasLength(1));
+        async.elapse(const Duration(seconds: 1));
+        final events = api.batchRequests.last.events;
+        expect(events.map((event) => event['event']), ['before', 'after']);
+        expect(events[0]['distinct_id'], previousId);
+        expect(events[1]['distinct_id'], nextId);
+      });
+    });
+
+    test('при нулевом интервале не запускает отправку автоматически', () {
+      final api = InProcessPostHogApi()
+        ..respond = (_) => const PostHogResponse(HttpStatus.tooManyRequests,
+            headers: {'retry-after': '120'});
+      fakeAsync((async) {
+        final client = testClient(api,
+            config: testConfig(flushAt: 1, flushInterval: Duration.zero));
+        client.capture('first');
+        async.elapse(Duration.zero);
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        client.capture('second');
+        client.flush();
+        async.elapse(const Duration(seconds: 120));
+        expect(api.batchRequests, hasLength(1));
+        client.flush();
+        client.flush();
+        async.elapse(Duration.zero);
+        expect(api.batchRequests, hasLength(2));
+        expect(api.batchRequests.last.eventNames, ['first', 'second']);
+      });
+    });
+
+    test('пауза batch не меняет повторы запросов flags', () {
+      final api = InProcessPostHogApi()
+        ..respond = (_) => const PostHogResponse(HttpStatus.serviceUnavailable,
+            headers: {'retry-after': '120'});
+      fakeAsync((async) {
+        final client = testClient(api);
+        client.capture('event');
+        client.flush().catchError((Object _) {});
+        async.elapse(Duration.zero);
+        api.respond = (_) => const PostHogResponse(HttpStatus.badGateway,
+            headers: {'retry-after': '120'});
+        client.reloadFeatureFlagsAsync();
+        async.elapse(const Duration(milliseconds: 300));
+        expect(api.flagsRequests, hasLength(2));
+        expect(api.batchRequests, hasLength(1));
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        async.elapse(const Duration(milliseconds: 119700));
+        expect(api.batchRequests, hasLength(2));
+      });
+    });
+
+    test('Retry-After в flags не останавливает очередь событий', () {
+      final api = InProcessPostHogApi()
+        ..respond = (request) => request.isFlags
+            ? const PostHogResponse(HttpStatus.tooManyRequests,
+                headers: {'retry-after': '120'})
+            : const PostHogResponse(HttpStatus.ok);
+      fakeAsync((async) {
+        final client = testClient(api);
+        client.reloadFeatureFlagsAsync();
+        async.elapse(Duration.zero);
+        client.capture('event');
+        client.flush();
+        async.elapse(Duration.zero);
+        expect(api.flagsRequests, hasLength(1));
+        expect(api.batchRequests.single.eventNames, ['event']);
+      });
+    });
+
+    test('новый rate limit задаёт новую паузу с минимальной задержкой', () {
+      final api = InProcessPostHogApi()
+        ..respond = (_) => const PostHogResponse(HttpStatus.tooManyRequests,
+            headers: {'retry-after': '60'});
+      final storage = tempStorage();
+      fakeAsync((async) {
+        final client = testClient(api, storage: storage);
+        client.capture('event');
+        client.flush().catchError((Object _) {});
+        async.elapse(Duration.zero);
+        api.respond = (_) => const PostHogResponse(HttpStatus.tooManyRequests,
+            headers: {'retry-after': '1'});
+        async.elapse(const Duration(seconds: 60));
+        expect(api.batchRequests, hasLength(2));
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        client.flush();
+        async.elapse(const Duration(milliseconds: 2999));
+        expect(api.batchRequests, hasLength(2));
+        async.elapse(const Duration(milliseconds: 1));
+        expect(api.batchRequests, hasLength(3));
+        expect(getQueue(storage), isEmpty);
+      });
+    });
+
+    test('close отменяет таймер и сохраняет очередь для следующего запуска',
+        () {
+      final api = InProcessPostHogApi()
+        ..respond = (_) => const PostHogResponse(HttpStatus.tooManyRequests,
+            headers: {'retry-after': '120'});
+      final dir = tempDirectory();
+      fakeAsync((async) {
+        final client = testClient(api, storage: FileStorage(dir.path));
+        client.capture('event');
+        client.flush().catchError((Object _) {});
+        async.elapse(Duration.zero);
+        client.close();
+        expect(async.pendingTimers, isEmpty);
+        async.elapse(const Duration(seconds: 120));
+        expect(api.batchRequests, hasLength(1));
+
+        api.respond = (_) => const PostHogResponse(HttpStatus.ok);
+        testClient(api, storage: FileStorage(dir.path)).flush();
+        async.elapse(Duration.zero);
+        expect(api.batchRequests.last.eventNames, ['event']);
+      });
+    });
+
+    test('ответ после close не создаёт новый таймер', () {
+      final api = InProcessPostHogApi();
+      fakeAsync((async) {
+        final response = Completer<PostHogResponse>();
+        api.respond = (_) => response.future;
+        final client = testClient(api);
+        client.capture('event');
+        client.flush().catchError((Object _) {});
+        async.elapse(Duration.zero);
+        client.close();
+        response.complete(const PostHogResponse(HttpStatus.tooManyRequests,
+            headers: {'retry-after': '120'}));
+        async.flushMicrotasks();
+        expect(async.pendingTimers, isEmpty);
+        expect(api.batchRequests, hasLength(1));
+      });
+    });
+  });
+
   group('Automatic flushing', () {
     test('flushes as soon as the queue reaches flushAt', () async {
       final server = await LocalPostHogServer.start();

@@ -50,7 +50,7 @@ class PostHogRequest {
 /// How the PostHog API answers a request.
 class PostHogResponse {
   const PostHogResponse(this.status,
-      {this.body = '{"status": 1}', this.location})
+      {this.body = '{"status": 1}', this.location, this.headers = const {}})
       : isDropped = false;
 
   /// A success with [json] as its body.
@@ -62,6 +62,7 @@ class PostHogResponse {
       : status = 0,
         body = '',
         location = null,
+        headers = const {},
         isDropped = true;
 
   final int status;
@@ -69,6 +70,8 @@ class PostHogResponse {
 
   /// Where a redirect points.
   final String? location;
+
+  final Map<String, String> headers;
 
   final bool isDropped;
 }
@@ -198,6 +201,7 @@ class LocalPostHogServer extends PostHogApiFake {
         return;
       }
       request.response.statusCode = response.status;
+      response.headers.forEach(request.response.headers.set);
       final location = response.location;
       if (location != null) {
         request.response.headers.set(HttpHeaders.locationHeader, location);
@@ -288,6 +292,9 @@ class _InProcessHeaders implements HttpHeaders {
   }
 
   @override
+  String? value(String name) => values[name.toLowerCase()];
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -295,10 +302,15 @@ class _InProcessResponse extends StreamView<List<int>>
     implements HttpClientResponse {
   _InProcessResponse(PostHogResponse response)
       : statusCode = response.status,
-        super(Stream.value(utf8.encode(response.body)));
+        super(Stream.value(utf8.encode(response.body))) {
+    response.headers.forEach(headers.set);
+  }
 
   @override
   final int statusCode;
+
+  @override
+  final _InProcessHeaders headers = _InProcessHeaders();
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

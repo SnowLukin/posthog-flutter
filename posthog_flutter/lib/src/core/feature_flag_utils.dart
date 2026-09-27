@@ -1,15 +1,19 @@
 import 'feature_flags.dart';
 
-/// Parses a v2 flags response JSON into a [PostHogFlagsResponse].
+/// Приводит rich и legacy ответы к [PostHogFlagsResponse].
 PostHogFlagsResponse parseFlagsResponse(
   Map<String, Object?> response, {
   required void Function(String key, Object error) onMalformedFlag,
 }) {
-  final flagsRaw = response['flags'] as Map<String, Object?>? ?? {};
+  final flags = response.containsKey('flags')
+      ? PostHogFeatureFlagDetail.parseAll(
+          response['flags'] as Map<String, Object?>? ?? {},
+          onMalformed: onMalformedFlag,
+        )
+      : _parseLegacyFlags(response, onMalformedFlag: onMalformedFlag);
 
   return PostHogFlagsResponse(
-    flags: PostHogFeatureFlagDetail.parseAll(flagsRaw,
-        onMalformed: onMalformedFlag),
+    flags: flags,
     errorsWhileComputingFlags:
         response['errorsWhileComputingFlags'] as bool? ?? false,
     quotaLimited: (response['quotaLimited'] as List<Object?>?)
@@ -20,6 +24,40 @@ PostHogFlagsResponse parseFlagsResponse(
     // Anything but an explicit true keeps full events.
     minimalFlagCalledEvents: response['minimalFlagCalledEvents'] == true,
   );
+}
+
+Map<String, PostHogFeatureFlagDetail> _parseLegacyFlags(
+  Map<String, Object?> response, {
+  required void Function(String key, Object error) onMalformedFlag,
+}) {
+  final values = response['featureFlags'] as Map<String, Object?>? ?? {};
+  final payloads = response['featureFlagPayloads'] as Map<String, Object?>?;
+  final flags = <String, PostHogFeatureFlagDetail>{};
+  for (final entry in values.entries) {
+    final value = entry.value;
+    if (value is! bool && value is! String) {
+      onMalformedFlag(entry.key,
+          const FormatException('Feature flag value must be bool or String'));
+      continue;
+    }
+
+    final rawPayload = payloads?[entry.key];
+    if (rawPayload != null && rawPayload is! String) {
+      onMalformedFlag(
+          entry.key,
+          const FormatException(
+              'Feature flag payload must be serialized JSON'));
+    }
+    flags[entry.key] = PostHogFeatureFlagDetail(
+      key: entry.key,
+      enabled: value is String || value == true,
+      variant: value is String ? value : null,
+      metadata: rawPayload is String
+          ? PostHogFeatureFlagMetadata(payload: rawPayload)
+          : null,
+    );
+  }
+  return flags;
 }
 
 /// Properties a minimal `$feature_flag_called` event keeps. The server asks
