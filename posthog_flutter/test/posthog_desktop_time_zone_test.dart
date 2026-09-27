@@ -5,7 +5,7 @@ void main() {
   group('DesktopTimeZone.read', () {
     test('reads the zone TZ names', () {
       expect(DesktopTimeZone.read({'TZ': 'Europe/Berlin'}), 'Europe/Berlin');
-    }, testOn: '!windows');
+    });
 
     test('reads /etc/localtime when TZ names no zone', () {
       expect(
@@ -14,8 +14,11 @@ void main() {
       );
     }, testOn: '!windows');
 
-    test('reads no zone on Windows', () {
-      expect(DesktopTimeZone.read({'TZ': 'Europe/Berlin'}), isNull);
+    test('Windows возвращает системный пояс IANA', () {
+      final zone = DesktopTimeZone.read(const {});
+      expect(zone, isNotNull);
+      expect(zone, isNot('Etc/Unknown'));
+      expect(DesktopTimeZone.fromTzVariable(zone), zone);
     }, testOn: 'windows');
   });
 

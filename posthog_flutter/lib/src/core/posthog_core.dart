@@ -138,7 +138,11 @@ abstract class PostHogCore extends PostHogCoreStateless {
     final now = DateTime.now().millisecondsSinceEpoch;
     // Resolved first: it may start a new session, which the debug
     // properties below then describe.
-    final sessionId = _session.touch(now);
+    final managedSessionId = _session.touch(now);
+    final callerSessionId = properties?[r'$session_id'];
+    final sessionId = callerSessionId is String && callerSessionId.isNotEmpty
+        ? callerSessionId
+        : managedSessionId;
     final timezone = getTimezone();
     return {
       ...props,
@@ -325,7 +329,7 @@ abstract class PostHogCore extends PostHogCoreStateless {
           }),
         );
         if (userProperties != null || userPropertiesSetOnce != null) {
-          _cachedPersonProperties = getPersonPropertiesHash(
+          _cachedPersonProperties = _personPropertiesHash(
               distinctId, userProperties, userPropertiesSetOnce);
         }
         _reloadFeatureFlags();
@@ -337,10 +341,6 @@ abstract class PostHogCore extends PostHogCoreStateless {
           r'$set': userProperties ?? {},
           r'$set_once': userPropertiesSetOnce ?? {},
         });
-        // Cached only after the capture, so an identical earlier
-        // setPersonProperties call cannot suppress the transition.
-        _cachedPersonProperties = getPersonPropertiesHash(
-            distinctId, userProperties, userPropertiesSetOnce);
         if (hasUserProperties) _reloadFeatureFlags();
       } else if (hasUserProperties) {
         // Person property changes are processed asynchronously by PostHog,
@@ -385,6 +385,14 @@ abstract class PostHogCore extends PostHogCoreStateless {
       }
 
       captureStateless(getDistinctId(), event, properties: allProperties);
+      if (event == r'$set' || event == r'$identify') {
+        final set = allProperties[r'$set'];
+        final setOnce = allProperties[r'$set_once'];
+        if (set is Map || setOnce is Map) {
+          _cachedPersonProperties =
+              _personPropertiesHash(getDistinctId(), set, setOnce);
+        }
+      }
     });
   }
 
@@ -544,7 +552,7 @@ abstract class PostHogCore extends PostHogCoreStateless {
     _loadingFlags = true;
     try {
       final distinctId = getDistinctId();
-      final groupsMap = (props[r'$groups'] as Map<String, Object?>?) ?? {};
+      final groupsMap = _getGroups();
       final personProperties = <String, Object?>{
         ...getDefaultPersonPropertiesForFlags(),
         ...getPersistedProperty<Map<String, Object?>>(
@@ -564,7 +572,7 @@ abstract class PostHogCore extends PostHogCoreStateless {
 
       final result = await getFlags(
         distinctId,
-        groups: groupsMap.cast<String, Object>(),
+        groups: groupsMap,
         personProperties: personProperties,
         groupProperties: groupProperties.map((k, v) => MapEntry(
             k, v is Map ? Map<String, Object?>.from(v) : <String, Object?>{})),
@@ -879,8 +887,14 @@ abstract class PostHogCore extends PostHogCoreStateless {
       getPersistedProperty<String>(PostHogPersistedProperty.personMode) ==
       'identified';
 
-  Map<String, Object?> _getGroups() {
-    return (props[r'$groups'] as Map<String, Object?>?) ?? {};
+  Map<String, String> _getGroups() {
+    final groups = props[r'$groups'];
+    if (groups is! Map) return {};
+    return {
+      for (final entry in groups.entries)
+        if (entry.key is String && entry.value is String)
+          entry.key as String: entry.value as String,
+    };
   }
 
   bool _hasPersonProcessing() {
@@ -943,7 +957,7 @@ abstract class PostHogCore extends PostHogCoreStateless {
       if (_ignoredWhileOptedOut('posthog.setPersonProperties')) return;
       if (!_requirePersonProcessing('posthog.setPersonProperties')) return;
 
-      final hash = getPersonPropertiesHash(
+      final hash = _personPropertiesHash(
           getDistinctId(), userPropertiesToSet, userPropertiesToSetOnce);
 
       if (_cachedPersonProperties == hash) {
@@ -962,9 +976,22 @@ abstract class PostHogCore extends PostHogCoreStateless {
         r'$set': userPropertiesToSet ?? {},
         r'$set_once': userPropertiesToSetOnce ?? {},
       });
-
-      _cachedPersonProperties = hash;
     });
+  }
+
+  static String _personPropertiesHash(
+    String distinctId,
+    Object? set,
+    Object? setOnce,
+  ) {
+    Map<String, Object?>? asMap(Object? value) {
+      if (value is! Map || value.isEmpty) return null;
+      return {
+        for (final entry in value.entries) entry.key.toString(): entry.value,
+      };
+    }
+
+    return getPersonPropertiesHash(distinctId, asMap(set), asMap(setOnce));
   }
 
   static bool _isNonEmptyMap(Object? value) => value is Map && value.isNotEmpty;
