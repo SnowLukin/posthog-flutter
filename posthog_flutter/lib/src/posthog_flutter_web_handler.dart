@@ -2,6 +2,7 @@
 
 import 'dart:js_interop';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:posthog_flutter/src/posthog_flutter_version.dart';
 import 'package:posthog_flutter/src/util/logging.dart';
@@ -20,6 +21,13 @@ extension PostHogExtension on PostHog {
     JSAny propertiesSetOnce,
   );
   external JSAny? capture(JSAny eventName, JSAny? properties, JSAny? options);
+  // Routes through posthog-js's error pipeline so required metadata and
+  // $exception_steps attach. The call site guards with try/catch.
+  external JSAny? captureException(JSAny? error, JSAny? additionalProperties);
+  // May be absent on older posthog-js builds; the call site guards with try/catch.
+  external void captureLog(JSAny options);
+  // May be absent on older posthog-js builds; the call site guards with try/catch.
+  external void addExceptionStep(JSAny message, JSAny? properties);
   external JSAny? alias(JSAny alias);
   // ignore: non_constant_identifier_names
   external JSAny? get_distinct_id();
@@ -59,6 +67,9 @@ extension PostHogExtension on PostHog {
   external void startSessionRecording();
   external void stopSessionRecording();
   external bool sessionRecordingStarted();
+  // ignore: non_constant_identifier_names
+  external void set_config(JSAny config);
+  external JSObject? get config;
   external SessionManager? get sessionManager;
   // ignore: non_constant_identifier_names
   external void _overrideSDKInfo(JSAny sdkName, JSAny sdkVersion);
@@ -122,6 +133,35 @@ void _maybeOverrideSDKInfo() {
   }
 }
 
+// Flutter 3.47+ compiles the pubspec `version` into every build as these
+// defines (flutter/flutter#187935). They are empty on older Flutter versions.
+const _flutterBuildName = String.fromEnvironment('FLUTTER_BUILD_NAME');
+const _flutterBuildNumber = String.fromEnvironment('FLUTTER_BUILD_NUMBER');
+
+/// Returns the `$app_version` and `$app_build` properties the native SDKs
+/// attach to every event, omitting any that are empty.
+///
+/// posthog-js has no notion of an app version, and the server-hosted
+/// `version.json` describes the latest deploy rather than the bundle actually
+/// running, so the compile-time build name and number are the only reliable
+/// source on web.
+@visibleForTesting
+Map<String, String> appVersionProperties({
+  String buildName = _flutterBuildName,
+  String buildNumber = _flutterBuildNumber,
+}) {
+  return {
+    if (buildName.isNotEmpty) '\$app_version': buildName,
+    if (buildNumber.isNotEmpty) '\$app_build': buildNumber,
+  };
+}
+
+void _addAppVersionProperties(Map<String, dynamic> properties) {
+  appVersionProperties().forEach(
+    (key, value) => properties.putIfAbsent(key, () => value),
+  );
+}
+
 Map<String, String> _getLocationProperties() {
   try {
     final location = web.window.location;
@@ -133,6 +173,23 @@ Map<String, String> _getLocationProperties() {
   } catch (_) {
     return {};
   }
+}
+
+// The human-readable message used only as the posthog-js captureException
+// trigger; its parse is overridden by the Dart-built properties we pass as
+// additionalProperties. Read from the exception list the Dart side builds.
+String _exceptionMessage(Map<String, Object?> properties) {
+  final exceptionList = properties[r'$exception_list'];
+  if (exceptionList is List && exceptionList.isNotEmpty) {
+    final first = exceptionList.first;
+    if (first is Map) {
+      final value = first['value'];
+      if (value is String && value.isNotEmpty) {
+        return value;
+      }
+    }
+  }
+  return 'Exception';
 }
 
 Future<dynamic> handleWebMethodCall(MethodCall call) async {
@@ -176,6 +233,7 @@ Future<dynamic> handleWebMethodCall(MethodCall call) async {
       final eventName = args['eventName'] as String;
       final properties = safeMapConversion(args['properties']);
       properties.addAll(_getLocationProperties());
+      _addAppVersionProperties(properties);
       final userProperties = safeMapConversion(args['userProperties']);
       final userPropertiesSetOnce = safeMapConversion(
         args['userPropertiesSetOnce'],
@@ -202,8 +260,37 @@ Future<dynamic> handleWebMethodCall(MethodCall call) async {
       final properties = safeMapConversion(args['properties']);
       properties['\$screen_name'] = screenName;
       properties.addAll(_getLocationProperties());
+      _addAppVersionProperties(properties);
 
       posthog?.capture(stringToJSAny('\$screen'), mapToJSAny(properties), null);
+      break;
+    case 'captureLog':
+      final body = args['body'] as String;
+      final level = args['level'] as String? ?? 'info';
+      final attributes = safeMapConversion(args['attributes']);
+      final traceId = args['traceId'] as String?;
+      final spanId = args['spanId'] as String?;
+      final traceFlags = args['traceFlags'] as int?;
+
+      // posthog-js captureLog options. See https://posthog.com/docs/logs
+      final options = <String, Object>{
+        'body': body,
+        'level': level,
+        if (attributes.isNotEmpty) 'attributes': attributes,
+        if (traceId != null) 'trace_id': traceId,
+        if (spanId != null) 'span_id': spanId,
+        // trace_flags 0 is meaningful (W3C sampled-false); only omit when null.
+        if (traceFlags != null) 'trace_flags': traceFlags,
+      };
+
+      try {
+        posthog?.captureLog(mapToJSAny(options));
+      } catch (error) {
+        // Older posthog-js builds lack captureLog and throw.
+        printIfDebug(
+          '[PostHog] captureLog is not supported by the loaded posthog-js version: $error',
+        );
+      }
       break;
     case 'alias':
       final alias = args['alias'] as String;
@@ -318,6 +405,22 @@ Future<dynamic> handleWebMethodCall(MethodCall call) async {
       // not supported on Web
       // analytics.callMethod('close');
       break;
+    case 'addExceptionStep':
+      final message = args['message'] as String;
+      final properties = safeMapConversion(args['properties']);
+
+      try {
+        posthog?.addExceptionStep(
+          stringToJSAny(message),
+          properties.isNotEmpty ? mapToJSAny(properties) : null,
+        );
+      } catch (error) {
+        // Older posthog-js builds lack addExceptionStep and throw.
+        printIfDebug(
+          '[PostHog] addExceptionStep is not supported by the loaded posthog-js version: $error',
+        );
+      }
+      break;
     case 'sendMetaEvent':
       // not supported on Web
       // Flutter Web uses the JS SDK for Session replay
@@ -355,12 +458,28 @@ Future<dynamic> handleWebMethodCall(MethodCall call) async {
     case 'captureException':
       final properties = safeMapConversion(args['properties']);
       properties.addAll(_getLocationProperties());
+      _addAppVersionProperties(properties);
 
-      posthog?.capture(
-        stringToJSAny('\$exception'),
-        mapToJSAny(properties),
-        null,
-      );
+      // Route through posthog-js's captureException so it attaches required
+      // metadata and any buffered $exception_steps. posthog-js spreads the
+      // additionalProperties last, so our Dart-built $exception_list (frames,
+      // mechanism.handled, level) overrides its synthetic parse of `message`.
+      try {
+        posthog?.captureException(
+          stringToJSAny(_exceptionMessage(properties)),
+          mapToJSAny(properties),
+        );
+      } catch (error) {
+        // Very old posthog-js lacks captureException; still record the event.
+        printIfDebug(
+          '[PostHog] captureException via posthog-js failed; falling back to capture: $error',
+        );
+        posthog?.capture(
+          stringToJSAny('\$exception'),
+          mapToJSAny(properties),
+          null,
+        );
+      }
       break;
     default:
       throw PlatformException(

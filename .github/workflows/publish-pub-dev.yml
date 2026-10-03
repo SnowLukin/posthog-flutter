@@ -1,7 +1,7 @@
 name: 'Publish to pub.dev'
 
 permissions:
-  contents: write
+  contents: read
 
 # pub.dev trusted publishing requires releases to run from GitHub tags.
 # Keep this tag-triggered workflow separate from the main release workflow; the
@@ -20,7 +20,7 @@ jobs:
       id-token: write # Required for authentication using OIDC
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -50,9 +50,6 @@ jobs:
 
           echo "✓ Tag '${TAG_VERSION}' is valid: commit message and pubspec.yaml version match."
 
-      - name: Setup Dart
-        uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
-
       - name: Setup Flutter
         # axi92/flutter-action is a fork of subosito/flutter-action that SHA-pins its internal
         # actions/cache calls; subosito itself uses tag refs which conflicts with our org-wide
@@ -64,6 +61,10 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Validate package
+        working-directory: ./posthog_flutter
+        run: flutter pub publish --dry-run
+
       - name: Get version from tag
         id: get-version
         run: |
@@ -71,9 +72,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $VERSION"
 
+      # setup-dart registers a pub.dev OIDC token that breaks public dependency downloads.
+      # Authenticate only after dependency resolution and package validation have succeeded.
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+
       - name: Publish to pub.dev
         working-directory: ./posthog_flutter
-        run: flutter pub publish --force
+        # Validation above is mandatory; repeating it here would download with the OIDC token.
+        run: flutter pub publish --force --skip-validation
 
       - name: Create GitHub release
         env:
@@ -98,22 +105,30 @@ jobs:
       # Notify in case of failure
       - name: Send failure event to PostHog
         if: ${{ failure() }}
-        uses: PostHog/posthog-github-action@58dea254b598fb5d469c0699c98af8288a7f7650 # v1.2.0
+        continue-on-error: true
+        uses: PostHog/posthog-github-action@9a6a19d360820ab4d95ecc4a5a7564062c895f84 # v1.3.0
         with:
           posthog-token: '${{ secrets.POSTHOG_PROJECT_API_KEY }}'
-          event: 'posthog-flutter-release-workflow-failure'
+          event: 'posthog-sdk-github-release-workflow-failure'
           properties: >-
             {
               "commitSha": "${{ github.sha }}",
               "jobStatus": "${{ job.status }}",
               "ref": "${{ github.ref }}",
-              "packageVersion": "${{ steps.get-version.outputs.version }}"
+              "repository": "${{ github.repository }}",
+              "sdk": "posthog-flutter",
+              "jobName": "publish",
+              "packageName": "posthog_flutter",
+              "packageVersion": "${{ steps.get-version.outputs.version || 'unknown' }}",
+              "actionUrl": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "alertText": ":rotating_light: Failed to publish posthog_flutter@${{ steps.get-version.outputs.version }} to pub.dev :rotating_light:",
+              "alertContext": "The pub.dev publish workflow failed."
             }
 
       - name: Restore Slack thread_ts from cache
         if: ${{ failure() }}
         id: restore-thread-ts-for-failure
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .slack-thread-ts
           key: slack-thread-ts-${{ steps.get-version.outputs.version }}
@@ -130,7 +145,7 @@ jobs:
       - name: Notify Slack - Failed
         continue-on-error: true
         if: ${{ failure() && steps.slack-thread-for-failure.outputs.thread_ts != '' }}
-        uses: PostHog/.github/.github/actions/slack-thread-reply@5fc4680761e8ac29a61b212756230eba0e276d8c
+        uses: PostHog/.github/.github/actions/slack-thread-reply@cb0979b67dcd585828b61ac45927eef4da8f6287 # main
         with:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
@@ -140,6 +155,7 @@ jobs:
 
   notify-released:
     name: Notify Slack - Released
+    permissions: {}
     needs: publish
     runs-on: ubuntu-latest
     if: always()
@@ -152,7 +168,7 @@ jobs:
 
       - name: Restore Slack thread_ts from cache
         id: restore-thread-ts
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .slack-thread-ts
           key: slack-thread-ts-${{ steps.get-version.outputs.version }}
@@ -172,7 +188,7 @@ jobs:
       - name: Notify Slack - Released
         if: needs.publish.result == 'success'
         continue-on-error: true
-        uses: PostHog/.github/.github/actions/slack-thread-reply@5fc4680761e8ac29a61b212756230eba0e276d8c
+        uses: PostHog/.github/.github/actions/slack-thread-reply@cb0979b67dcd585828b61ac45927eef4da8f6287 # main
         with:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}
@@ -183,7 +199,7 @@ jobs:
       - name: Notify Slack - Failed
         if: needs.publish.result == 'failure'
         continue-on-error: true
-        uses: PostHog/.github/.github/actions/slack-thread-reply@5fc4680761e8ac29a61b212756230eba0e276d8c
+        uses: PostHog/.github/.github/actions/slack-thread-reply@cb0979b67dcd585828b61ac45927eef4da8f6287 # main
         with:
           slack_bot_token: ${{ secrets.SLACK_CLIENT_LIBRARIES_BOT_TOKEN }}
           slack_channel_id: ${{ vars.SLACK_APPROVALS_CLIENT_LIBRARIES_CHANNEL_ID }}

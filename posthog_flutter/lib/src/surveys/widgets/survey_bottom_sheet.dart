@@ -15,6 +15,8 @@ import 'open_text_question.dart';
 import 'rating_question.dart';
 import 'choice_question.dart';
 import 'confirmation_message.dart';
+import 'survey_icon.dart';
+import 'intro_message.dart';
 
 /// A bottom sheet that displays a survey to the user.
 class SurveyBottomSheet extends StatefulWidget {
@@ -38,8 +40,18 @@ class SurveyBottomSheet extends StatefulWidget {
 }
 
 class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
-  int _currentIndex = 0;
+  late int _currentIndex = widget.survey.initialQuestionIndex;
   bool _isCompleted = false;
+  bool _isSubmitting = false;
+  // Advancing past the intro is a pure UI transition: no response is recorded
+  // and no survey event is sent. The X button keeps closing the survey.
+  // The intro has no default header, so an intro with no copy at all is
+  // skipped instead of drawing an empty sheet with a lone button.
+  late bool _showingIntroScreen = widget.survey.initialQuestionIndex == 0 &&
+      (widget.survey.appearance?.displayIntroScreen ?? false) &&
+      ((widget.survey.appearance?.introScreenHeader?.isNotEmpty ?? false) ||
+          (widget.survey.appearance?.introScreenDescription?.isNotEmpty ??
+              false));
 
   @override
   void initState() {
@@ -52,29 +64,58 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
     Navigator.of(context).pop();
   }
 
+  Future<void> _submitResponse(Object? response, {String? link}) async {
+    if (_isSubmitting || _isCompleted) return;
+    setState(() => _isSubmitting = true);
+    try {
+      final nextQuestion = await widget.onResponse(
+        widget.survey,
+        _currentIndex,
+        response,
+      );
+      if (!mounted || nextQuestion == null) return;
+
+      // Open the URL if provided
+      if (link != null && link.isNotEmpty) {
+        await PosthogFlutterPlatformInterface.instance.openUrl(link);
+      }
+
+      // Update state
+      if (!mounted) return;
+      if (nextQuestion.isSurveyCompleted &&
+          !widget.appearance.displayThankYouMessage) {
+        _handleClose();
+        return;
+      }
+      setState(() {
+        _currentIndex = nextQuestion.questionIndex;
+        _isCompleted = nextQuestion.isSurveyCompleted;
+      });
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
   Widget _buildQuestion(BuildContext context) {
     final survey = widget.survey;
     final currentQuestion = survey.questions[_currentIndex];
 
     switch (currentQuestion.type) {
       case PostHogSurveyQuestionType.openText:
+        final appearance =
+            SurveyAppearance.fromPostHog(widget.survey.appearance);
         return OpenTextQuestion(
           key: ValueKey('open_text_question_$_currentIndex'),
           question: currentQuestion.question,
           description: currentQuestion.description,
           descriptionContentType: currentQuestion.descriptionContentType,
-          appearance: SurveyAppearance.fromPostHog(widget.survey.appearance),
-          onSubmit: (response) async {
-            final nextQuestion = await widget.onResponse(
-              widget.survey,
-              _currentIndex,
-              response,
-            );
-            setState(() {
-              _currentIndex = nextQuestion.questionIndex;
-              _isCompleted = nextQuestion.isSurveyCompleted;
-            });
-          },
+          appearance: appearance,
+          buttonText: surveyQuestionButtonLabel(
+            currentQuestion.buttonText,
+            appearance.submitButtonText,
+          ),
+          optional: currentQuestion.optional,
+          onSubmit: _submitResponse,
         );
       case PostHogSurveyQuestionType.link:
         final linkQuestion = currentQuestion as PostHogDisplayLinkQuestion;
@@ -86,26 +127,11 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
           appearance: SurveyAppearance.fromPostHog(widget.survey.appearance),
           buttonText: linkQuestion.buttonText,
           link: linkQuestion.link,
-          onPressed: () async {
-            // Send survey response (true for link questions)
-            final nextQuestion = await widget.onResponse(
-              widget.survey,
-              _currentIndex,
-              true, // Boolean response for link questions
-            );
-
-            // Open the URL if provided
-            final link = linkQuestion.link;
-            if (link.isNotEmpty) {
-              await PosthogFlutterPlatformInterface.instance.openUrl(link);
-            }
-
-            // Update state
-            setState(() {
-              _currentIndex = nextQuestion.questionIndex;
-              _isCompleted = nextQuestion.isSurveyCompleted;
-            });
-          },
+          // Send survey response (true for link questions)
+          onPressed: () => _submitResponse(
+            true, // Boolean response for link questions
+            link: linkQuestion.link,
+          ),
         );
       case PostHogSurveyQuestionType.rating:
         final ratingQuestion = currentQuestion as PostHogDisplayRatingQuestion;
@@ -118,22 +144,14 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
           appearance: SurveyAppearance.fromPostHog(widget.survey.appearance),
           buttonText: ratingQuestion.buttonText,
           optional: ratingQuestion.optional,
+          skipSubmitButton: ratingQuestion.skipSubmitButton,
           scaleLowerBound: ratingQuestion.scaleLowerBound,
           scaleUpperBound: ratingQuestion.scaleUpperBound,
           type: ratingQuestion.ratingType,
           lowerBoundLabel: ratingQuestion.lowerBoundLabel,
           upperBoundLabel: ratingQuestion.upperBoundLabel,
-          onSubmit: (response) async {
-            final nextQuestion = await widget.onResponse(
-              widget.survey,
-              _currentIndex,
-              response, // Pass integer directly
-            );
-            setState(() {
-              _currentIndex = nextQuestion.questionIndex;
-              _isCompleted = nextQuestion.isSurveyCompleted;
-            });
-          },
+          // Pass integer directly
+          onSubmit: _submitResponse,
         );
       case PostHogSurveyQuestionType.singleChoice:
       case PostHogSurveyQuestionType.multipleChoice:
@@ -144,25 +162,17 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
           description: choiceQuestion.description,
           descriptionContentType: choiceQuestion.descriptionContentType,
           choices: choiceQuestion.choices,
+          shuffleOptions: choiceQuestion.shuffleOptions,
+          skipSubmitButton: choiceQuestion.skipSubmitButton,
           appearance: SurveyAppearance.fromPostHog(widget.survey.appearance),
           buttonText: choiceQuestion.buttonText,
           optional: choiceQuestion.optional,
           hasOpenChoice: choiceQuestion.hasOpenChoice,
           isMultipleChoice:
               currentQuestion.type == PostHogSurveyQuestionType.multipleChoice,
-          onSubmit: (response) async {
-            // Both single and multiple choice questions return List<String>
-            // Single choice will be a list with one element
-            final nextQuestion = await widget.onResponse(
-              widget.survey,
-              _currentIndex,
-              response,
-            );
-            setState(() {
-              _currentIndex = nextQuestion.questionIndex;
-              _isCompleted = nextQuestion.isSurveyCompleted;
-            });
-          },
+          // A selection is a List<String> (one entry for single choice).
+          // An empty optional skip is null.
+          onSubmit: _submitResponse,
         );
     }
   }
@@ -173,9 +183,7 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
 
     return PopScope(
       canPop: false,
-      // TODO: replace with onPopInvokedWithResult once set bump the min Flutter version to 3.24
-      // ignore: deprecated_member_use
-      onPopInvoked: (didPop) {
+      onPopInvokedWithResult: (didPop, _) {
         if (!didPop) {
           _handleClose();
         }
@@ -199,8 +207,8 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
                       IconButton(
-                        icon: Icon(
-                          Icons.close,
+                        icon: SurveyIcon(
+                          type: SurveyIconType.close,
                           color: widget.appearance.closeButtonColor,
                         ),
                         onPressed: () => _handleClose(),
@@ -217,9 +225,7 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          if (!_isCompleted)
-                            _buildQuestion(context)
-                          else
+                          if (_isCompleted)
                             ConfirmationMessage(
                               onClose: _handleClose,
                               appearance: widget.appearance,
@@ -228,6 +234,22 @@ class _SurveyBottomSheetState extends State<SurveyBottomSheet> {
                                       .appearance
                                       ?.thankYouMessageDescriptionContentType ??
                                   PostHogDisplaySurveyTextContentType.text,
+                            )
+                          else if (_showingIntroScreen)
+                            IntroMessage(
+                              onStart: () =>
+                                  setState(() => _showingIntroScreen = false),
+                              appearance: widget.appearance,
+                              introScreenDescriptionContentType: widget
+                                      .survey
+                                      .appearance
+                                      ?.introScreenDescriptionContentType ??
+                                  PostHogDisplaySurveyTextContentType.text,
+                            )
+                          else
+                            AbsorbPointer(
+                              absorbing: _isSubmitting,
+                              child: _buildQuestion(context),
                             ),
                         ],
                       ),

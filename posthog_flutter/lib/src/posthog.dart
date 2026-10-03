@@ -5,10 +5,15 @@ import 'package:meta/meta.dart';
 import 'package:posthog_flutter/src/error_tracking/posthog_error_tracking_autocapture_integration.dart';
 import 'package:posthog_flutter/src/error_tracking/posthog_exception.dart';
 import 'feature_flag_result.dart';
+import 'logs/posthog_log_record.dart';
+import 'logs/posthog_log_severity.dart';
+import 'logs/posthog_logger.dart';
 import 'posthog_config.dart';
 import 'posthog_flutter_platform_interface.dart';
 import 'posthog_internal_events.dart';
 import 'posthog_observer.dart';
+import 'replay/mask/posthog_mask_controller.dart';
+import 'utils/before_send.dart';
 
 /// Entry point for the PostHog Flutter SDK.
 ///
@@ -38,6 +43,10 @@ class Posthog {
   /// To listen for feature flag load events, provide an `onFeatureFlags`
   /// callback in the [PostHogConfig].
   ///
+  /// Repeated setup reapplies Dart-side settings such as the error-tracking
+  /// hooks. Most native settings still require [close] before setup because
+  /// the native SDKs ignore repeated setup.
+  ///
   /// Returns a [Future] that completes when platform setup has finished.
   ///
   /// **Example:**
@@ -63,6 +72,11 @@ class Posthog {
 
     _config = config; // Store the config
 
+    // The mask controller singleton may predate this setup() (or a previous
+    // setup() built it with different masking flags); without a refresh the
+    // stale parser map would keep deciding what replay masks on every platform.
+    PostHogMaskController.instance.refreshParsers(config.sessionReplayConfig);
+
     if (config.sessionReplay) {
       PostHogInternalEvents.sessionRecordingActive.value = true;
     }
@@ -73,7 +87,8 @@ class Posthog {
   }
 
   void _installFlutterIntegrations(PostHogConfig config) {
-    // Install exception autocapture if enabled
+    _uninstallFlutterIntegrations();
+
     if (config.errorTrackingConfig.captureFlutterErrors ||
         config.errorTrackingConfig.capturePlatformDispatcherErrors ||
         config.errorTrackingConfig.captureIsolateErrors) {
@@ -112,6 +127,9 @@ class Posthog {
   /// `$set_once`.
   ///
   /// Returns a [Future] that completes when the identify call has been queued.
+  ///
+  /// Note that identifying a user reloads feature flags, which issues a
+  /// `/flags` request even when [PostHogConfig.preloadFeatureFlags] is `false`.
   ///
   /// **Example:**
   /// ```dart
@@ -227,6 +245,112 @@ class Posthog {
     return _posthog.screen(screenName: screenName, properties: properties);
   }
 
+  /// Captures a structured log record.
+  ///
+  /// Docs: https://posthog.com/docs/logs
+  ///
+  /// `captureLog` is not gated by remote config.
+  ///
+  /// The [body] is the log message. A blank body is dropped before
+  /// [PostHogLogsConfig.beforeSend] runs.
+  ///
+  /// The optional [level] is the severity, defaulting to
+  /// [PostHogLogSeverity.info].
+  ///
+  /// The optional [attributes] are per-record attributes (e.g. request id,
+  /// duration). Values must be supported by the platform channel serializer.
+  ///
+  /// The optional [traceId], [spanId], and [traceFlags] are W3C distributed
+  /// tracing fields used to correlate a log with a trace. [traceId] is a
+  /// 32-character lowercase hex string, [spanId] is 16 characters, and
+  /// [traceFlags] is a bitfield whose bit 0 is the `sampled` flag (an explicit
+  /// `0` is emitted; `null` omits the field). They pass through unchanged and
+  /// are not visible to [PostHogLogsConfig.beforeSend].
+  ///
+  /// Auto-captured context (distinct id, session id, screen name, app state,
+  /// active feature flags) is added by the native SDK.
+  ///
+  /// Records are passed through [PostHogLogsConfig.beforeSend] before being
+  /// forwarded to the native SDK; a callback may modify or drop them.
+  ///
+  /// Returns a [Future] that completes when the record has been forwarded.
+  ///
+  /// **Windows/Linux:** not supported.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// await Posthog().captureLog(
+  ///   body: 'checkout completed',
+  ///   level: PostHogLogSeverity.info,
+  ///   attributes: {'order_id': 'ord_789'},
+  /// );
+  /// ```
+  Future<void> captureLog({
+    required String body,
+    PostHogLogSeverity level = PostHogLogSeverity.info,
+    Map<String, Object>? attributes,
+    String? traceId,
+    String? spanId,
+    int? traceFlags,
+  }) async {
+    if (body.trim().isEmpty) {
+      return;
+    }
+
+    var record = PostHogLogRecord(
+      body: body,
+      level: level,
+      attributes: attributes == null ? null : {...attributes},
+    );
+
+    final callbacks =
+        _config?.logsConfig.beforeSend ?? const <BeforeSendLogCallback>[];
+    for (final callback in callbacks) {
+      try {
+        final result = await runBeforeSend<PostHogLogRecord>(callback, record);
+        if (result == null) {
+          debugPrint('[PostHog] Log dropped by beforeSend');
+          return;
+        }
+        record = result;
+      } catch (e) {
+        debugPrint('[PostHog] beforeSend threw, dropping log: $e');
+        return;
+      }
+    }
+
+    // A beforeSend callback may have blanked the body, which drops the record.
+    if (record.body.trim().isEmpty) {
+      return;
+    }
+
+    return _posthog.captureLog(
+      body: record.body,
+      level: record.level,
+      attributes: record.attributes,
+      traceId: traceId,
+      spanId: spanId,
+      traceFlags: traceFlags,
+    );
+  }
+
+  PostHogLogger? _logger;
+
+  /// Per-level logger facade for capturing structured logs.
+  ///
+  /// Each helper delegates to [captureLog] with the matching severity. Built
+  /// once on first access and cached.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// Posthog().logger.info('user signed in', {'method': 'google'});
+  /// Posthog().logger.error('payment failed', {'error_code': 'E001'});
+  /// ```
+  PostHogLogger get logger => _logger ??= PostHogLogger(
+        (body, level, attributes) =>
+            captureLog(body: body, level: level, attributes: attributes),
+      );
+
   /// Creates an alias for the current user.
   ///
   /// Docs:
@@ -247,7 +371,12 @@ class Posthog {
   /// The SDK will behave as if it has been [setup] for the first time.
   ///
   /// Returns a [Future] that completes when the reset request has been queued.
-  Future<void> reset() => _posthog.reset();
+  Future<void> reset() async {
+    // Bumped before the platform call because native rotates inside that round
+    // trip.
+    PostHogInternalEvents.requestReplaySessionReset();
+    await _posthog.reset();
+  }
 
   /// Disables data collection for the current user.
   ///
@@ -436,6 +565,9 @@ class Posthog {
   ///
   /// Returns a [Future] that completes when the group call has been queued.
   ///
+  /// Note that setting a group reloads feature flags, which issues a `/flags`
+  /// request even when [PostHogConfig.preloadFeatureFlags] is `false`.
+  ///
   /// **Example:**
   /// ```dart
   /// await Posthog().group(
@@ -454,6 +586,126 @@ class Posthog {
         groupType: groupType,
         groupKey: groupKey,
         groupProperties: groupProperties,
+      );
+
+  /// Registers this device's push token so PostHog Workflows can target it.
+  ///
+  /// Both platforms register a token automatically at startup when
+  /// [PostHogConfig.capturePushNotificationSubscriptions] is enabled, so the
+  /// main reason to call this is a token refresh, which that startup fetch
+  /// cannot see.
+  ///
+  /// [appId] identifies the app the token belongs to: the Firebase
+  /// `project_id` for an FCM token, the APNs bundle id for an APNs token. It is
+  /// what tells PostHog which provider to deliver through — the platform is
+  /// only recorded alongside it. Leave it `null` and iOS falls back to the
+  /// bundle id while Android falls back to the default `FirebaseApp`'s project
+  /// id, so pass it explicitly if your app does not use Firebase or registers
+  /// for a non-default Firebase project. Android cannot register without one
+  /// and reports the skip as a `PlatformException`, logged in debug builds.
+  ///
+  /// **The default is APNs on iOS and FCM on Android**, matching what
+  /// [PostHogConfig.capturePushNotificationSubscriptions] registers on its own.
+  /// `firebase_messaging`'s `onTokenRefresh` yields an FCM token on both
+  /// platforms, so forwarding it unguarded pairs an FCM token with the iOS
+  /// bundle id and delivery fails:
+  ///
+  /// ```dart
+  /// if (Platform.isAndroid) {
+  ///   FirebaseMessaging.instance.onTokenRefresh.listen(
+  ///     (token) => Posthog().registerPushNotificationToken(token),
+  ///   );
+  /// }
+  /// ```
+  ///
+  /// **Using FCM on both platforms** is supported — pass the Firebase
+  /// `project_id` as [appId] on iOS too — but you must set
+  /// [PostHogConfig.capturePushNotificationSubscriptions] to `false` first.
+  /// PostHog stores one subscription per app id, so leaving automatic
+  /// registration on gives an iOS device two: an APNs one under the bundle id
+  /// and an FCM one under the project id. A Workflow configured with both
+  /// integrations then delivers to that device twice, and
+  /// [unregisterPushNotificationToken] only clears the most recently registered
+  /// of the two.
+  ///
+  /// Registration also fails server-side if your PostHog project has no
+  /// Firebase or APNs integration configured for [appId].
+  ///
+  /// Call this only after [setup] has completed: the native SDKs silently drop
+  /// a token registered before they are initialized, and this method still
+  /// completes without an error.
+  ///
+  /// Not supported on Flutter web, macOS, Windows or Linux.
+  Future<void> registerPushNotificationToken(
+    String deviceToken, {
+    String? appId,
+  }) =>
+      _posthog.registerPushNotificationToken(deviceToken, appId: appId);
+
+  /// Unregisters this device's push token so Workflows stop targeting it — for
+  /// example from your logout flow.
+  ///
+  /// The intent is durable: if the request fails or the device is offline, the
+  /// native SDK retries it on the next flush or app launch. [reset] already
+  /// moves a registered token to the new anonymous identity on its own, so this
+  /// is only needed when you manage subscriptions yourself.
+  ///
+  /// Not supported on Flutter web, macOS, Windows or Linux.
+  Future<void> unregisterPushNotificationToken() =>
+      _posthog.unregisterPushNotificationToken();
+
+  /// Captures `$push_notification_opened` when a user opens a push
+  /// notification.
+  ///
+  /// Call this only for opens [PostHogConfig.capturePushNotificationOpened]
+  /// cannot see itself — local notifications on either platform, notifications
+  /// you display yourself from a foreground message, and push delivered outside
+  /// FCM on Android. That doc has the full coverage matrix.
+  ///
+  /// Do not wire this to `FirebaseMessaging.onMessageOpenedApp` or
+  /// `getInitialMessage()`: the SDK already captures those taps. On both
+  /// platforms a second report of a PostHog-sent notification within 5 minutes
+  /// of the first is skipped; an open of a push PostHog did not send carries
+  /// nothing to match on, so it is counted twice.
+  ///
+  /// That dedupe also means a manual call cannot enrich an automatic capture.
+  /// The Android tray intent carries no notification text, so its automatic
+  /// event has no `$notification_title` or `$notification_body`, and
+  /// re-reporting the tap with them is skipped rather than merged.
+  ///
+  /// ```dart
+  /// // A notification you built and displayed yourself.
+  /// Posthog().capturePushNotificationOpened(
+  ///   title: 'Your order shipped',
+  ///   body: 'Track it in the app',
+  ///   payload: {'order_id': '1234'},
+  /// );
+  /// ```
+  ///
+  /// The event is built natively, so [PostHogConfig.beforeSend] callbacks do
+  /// not run on it — redact anything sensitive before passing it here.
+  ///
+  /// Keys of [payload]'s `posthog` entry become `$notification_<key>`
+  /// properties; it is decoded natively whether it arrives as a map or as a
+  /// JSON string. Leave [action] `null` for a plain tap — only action-button
+  /// taps carry an identifier.
+  ///
+  /// [subtitle] is iOS only and ignored on Android, which has no such field.
+  ///
+  /// Not supported on Flutter web, Windows or Linux.
+  Future<void> capturePushNotificationOpened({
+    String? title,
+    String? subtitle,
+    String? body,
+    Map<String, Object?>? payload,
+    String? action,
+  }) =>
+      _posthog.capturePushNotificationOpened(
+        title: title,
+        subtitle: subtitle,
+        body: body,
+        payload: payload,
+        action: action,
       );
 
   /// Returns the feature flag value for [key].
@@ -553,9 +805,74 @@ class Posthog {
     );
   }
 
+  /// Records an exception step (breadcrumb-style context record).
+  ///
+  /// Steps accumulate in a rolling, byte-bounded buffer and are attached to
+  /// every captured `$exception` event as `$exception_steps`, giving the
+  /// PostHog error-tracking UI a timeline of recent activity leading up to each
+  /// error. The buffer rotates only by byte-budget eviction (see
+  /// [PostHogExceptionStepsConfig.maxBytes]) and is not cleared by a capture or
+  /// an identity change.
+  ///
+  /// The buffer is owned by the embedded native SDK, so steps also survive
+  /// native fatal crashes and attach to the crash `$exception` reported on the
+  /// next launch.
+  ///
+  /// The [message] is a short, non-empty description of what happened; an empty
+  /// or whitespace-only message is ignored. The optional [properties] are
+  /// additional context. The reserved keys `$message` and `$timestamp` are
+  /// stripped — the SDK sets the canonical values, including a timestamp
+  /// captured when the step is recorded.
+  ///
+  /// Recording never throws into your app and does not block the caller.
+  ///
+  /// **Note:**
+  /// - Flutter web: forwarded to posthog-js. Steps attach to exceptions
+  ///   captured by posthog-js, but not to exceptions captured via
+  ///   [captureException] on web.
+  /// - Windows/Linux: the buffer is kept in memory by the Dart
+  ///   implementation, and no native crashes are captured on desktop.
+  ///
+  /// **Example:**
+  /// ```dart
+  /// Posthog().addExceptionStep(
+  ///   'User tapped Checkout',
+  ///   properties: {'screen': 'cart'},
+  /// );
+  /// ```
+  Future<void> addExceptionStep(
+    String message, {
+    Map<String, Object>? properties,
+  }) {
+    if (message.trim().isEmpty) {
+      debugPrint('[PostHog] addExceptionStep called with an empty message.');
+      return Future<void>.value();
+    }
+    // Honor the documented no-op contract on every platform: native enforces
+    // `enabled` via the config forwarded at setup, but on web `setup` doesn't
+    // push it to posthog-js, so guard here too.
+    if (_config?.errorTrackingConfig.exceptionSteps.enabled == false) {
+      return Future<void>.value();
+    }
+    return _posthog.addExceptionStep(message, properties: properties);
+  }
+
   /// Closes the PostHog SDK and cleans up resources.
   ///
+  /// This is also the entry point for reconfiguring: the native SDKs ignore a
+  /// repeated [setup], so changing the project token, host, or native session
+  /// replay settings means calling [close] first and then [setup] again.
+  ///
+  /// Whatever session replay records after the next [setup] starts as a fresh
+  /// recording. Whether the platform also changes the *session* here differs by
+  /// platform, so do not rely on a [close]/[setup] pair rotating the session id.
+  ///
   /// Returns a [Future] that completes when platform resources have been closed.
+  ///
+  /// **Windows/Linux:** first makes one attempt to send the queued events and
+  /// waits for it for up to two seconds. Events left unsent go out with the
+  /// next [setup], or are lost when the application support directory is
+  /// unavailable and state is kept in memory.
   ///
   /// **Note:** After calling `close()`, surveys will not be rendered until the
   /// SDK is re-initialized and the next navigation event occurs.
@@ -563,6 +880,10 @@ class Posthog {
     _config = null;
     _currentScreen = null;
     PostHogInternalEvents.sessionRecordingActive.value = false;
+    // Forced rather than keyed on observing a new session id, because the
+    // platforms disagree on whether close() rotates the session at all — the
+    // recording that follows must start clean either way.
+    PostHogInternalEvents.requestReplaySessionReset();
     PosthogObserver.clearCurrentContext();
 
     // Uninstall Flutter integrations
@@ -583,10 +904,20 @@ class Posthog {
   /// replay is disabled in your project settings.
   ///
   /// Set [resumeCurrent] to `true` (the default) to resume recording the current
-  /// session. Set it to `false` to start a new session and begin recording.
+  /// session. Set it to `false` to start a new session and begin recording —
+  /// though a new session is not guaranteed while recording is already active,
+  /// so call [stopSessionRecording] first if you need one. Either way, `false`
+  /// restarts the recording even when the platform keeps the current session id.
   ///
   /// Returns a [Future] that completes when the start request has been sent.
+  ///
+  /// **Windows/Linux:** not supported.
   Future<void> startSessionRecording({bool resumeCurrent = true}) async {
+    if (!resumeCurrent) {
+      // The new recording must send its own meta event rather than inherit the
+      // previous session's latch, even where the platform keeps the same id.
+      PostHogInternalEvents.requestReplaySessionReset();
+    }
     await _posthog.startSessionRecording(resumeCurrent: resumeCurrent);
     PostHogInternalEvents.sessionRecordingActive.value = true;
   }
@@ -596,6 +927,8 @@ class Posthog {
   /// This method will have no effect if PostHog is not enabled.
   ///
   /// Returns a [Future] that completes when the stop request has been sent.
+  ///
+  /// **Windows/Linux:** not supported.
   Future<void> stopSessionRecording() async {
     await _posthog.stopSessionRecording();
     PostHogInternalEvents.sessionRecordingActive.value = false;
@@ -605,6 +938,8 @@ class Posthog {
   ///
   /// Returns `false` when session replay is inactive or unsupported by the
   /// current platform.
+  ///
+  /// **Windows/Linux:** not supported.
   Future<bool> isSessionReplayActive() => _posthog.isSessionReplayActive();
 
   Posthog._internal();

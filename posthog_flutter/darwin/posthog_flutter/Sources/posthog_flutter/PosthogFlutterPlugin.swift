@@ -1,15 +1,59 @@
-import PostHog
+@_spi(PostHogInternal) import PostHog
 #if os(iOS)
     import Flutter
     import UIKit
+    import WebKit
 #elseif os(macOS)
     import AppKit
     import FlutterMacOS
 #endif
 
+// A nil identity token sends the request unauthenticated, which a project requiring
+// identity verification rejects server-side. Log the reason so that failure is greppable
+// and distinct from a host that deliberately returned nil.
+private func declinePushIdentity(_ completion: (String?) -> Void, _ reason: String) {
+    print("[PostHog] Push subscription will be sent unauthenticated: \(reason)")
+    completion(nil)
+}
+
 public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
+    #if os(iOS)
+        // Occlusion episode protocol: a main-thread timer — independent of
+        // Flutter's frame lifecycle, which can pause under a native cover —
+        // pushes occlusion transitions to Dart and drives bridge captures.
+        private var occlusionTimer: Timer?
+        private var isOccluded = false
+        var bridgeEnabled = false
+        // Whether the episode has delivered its first bridged frame.
+        private var bridgeEpisodeStarted = false
+        // End-transition debounce: ticks reading not-occluded while an episode is active.
+        private var notOccludedTicks = 0
+        // Whether the episode is being held open across a run of inactive reads.
+        private var heldWhileInactive = false
+        // Monotonic episode id, stamped into every push so Dart drops stale-episode work.
+        private var occlusionEpisode = 0
+        // Failed captures before the episode's first delivered frame; at the limit it
+        // falls back (bridgeFailed). After first delivery, failures never demote.
+        private var bridgeFailureStrikes = 0
+        private static let bridgeFailureStrikeLimit = 3
+        // Ticks a not-occluded read must repeat before it ends an episode. Both
+        // the active and the inactive path debounce, and they have to agree.
+        private static let endDebounceTicks = 1
+    #endif
+
     private static var instance: PosthogFlutterPlugin?
     private var channel: FlutterMethodChannel?
+
+    // Mint route for pushIdentityProvider, anchored to the engine whose setup()
+    // installed the provider. A live owner is never displaced; provider-enabled
+    // engines stay candidates so detach promotes the most recent survivor instead
+    // of orphaning the route, and with none left it declines fast rather than
+    // stalling the native 10s mint watchdog.
+    //
+    // Main-thread confined: the check-then-act on these fields relies on it.
+    // Channel callbacks already arrive there; detach does not, so it hops.
+    private static var pushChannelCandidates: [FlutterMethodChannel] = []
+    private static var pushChannel: FlutterMethodChannel?
 
     public static func getInstance() -> PosthogFlutterPlugin? {
         instance
@@ -39,6 +83,7 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
         let instance = PosthogFlutterPlugin()
         instance.channel = methodChannel
         PosthogFlutterPlugin.instance = instance
+        prewarmPushNotificationOpenCapture()
         initPlugin()
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
     }
@@ -49,6 +94,24 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
 
     private let dispatchQueue = DispatchQueue(label: "com.posthog.PosthogFlutterPlugin",
                                               target: .global(qos: .utility))
+
+    /// A cold launch from a notification tap delivers the response about 150ms in, before Dart can
+    /// reach `Posthog().setup()`. Registration runs inside `didFinishLaunchingWithOptions`, early
+    /// enough for the native SDK to hold that response until setup() installs the integration.
+    ///
+    /// The Info.plist key is the only opt-out reachable this early. `setup()` releases an unwanted
+    /// prewarm afterwards, except when PostHog is already set up with push-open capture disabled and
+    /// a later `FlutterEngine` registers — that setup() has already run, so use the plist key there.
+    private static func prewarmPushNotificationOpenCapture() {
+        guard plistCapturePushNotificationOpened else { return }
+        if #available(iOS 14.0, macOS 11.0, *) {
+            PostHogSDK.prewarmPushNotificationOpenCapture()
+        }
+    }
+
+    private static var plistCapturePushNotificationOpened: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.CAPTURE_PUSH_NOTIFICATION_OPENED") as? Bool ?? true
+    }
 
     public static func initPlugin() {
         let autoInit = Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.AUTO_INIT") as? Bool ?? true
@@ -61,7 +124,8 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         if Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.PROJECT_TOKEN") == nil,
-           Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.API_KEY") != nil {
+           Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.API_KEY") != nil
+        {
             print("[PostHog] com.posthog.posthog.API_KEY is deprecated and will be removed in the next major version. Use com.posthog.posthog.PROJECT_TOKEN instead!")
         }
 
@@ -74,6 +138,9 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let captureApplicationLifecycleEvents = Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.CAPTURE_APPLICATION_LIFECYCLE_EVENTS") as? Bool ?? true
         let debug = Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.DEBUG") as? Bool ?? false
+        // Push flags default ON natively and setup() no-ops a second call, so a later
+        // Dart-side opt-out can never reach the SDK — the plist is the only opt-out here.
+        let capturePushNotificationSubscriptions = Bundle.main.object(forInfoDictionaryKey: "com.posthog.posthog.CAPTURE_PUSH_NOTIFICATION_SUBSCRIPTIONS") as? Bool ?? true
 
         setupPostHog([
             "projectToken": projectToken,
@@ -81,11 +148,16 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             "host": host,
             "captureApplicationLifecycleEvents": captureApplicationLifecycleEvents,
             "debug": debug,
+            "capturePushNotificationSubscriptions": capturePushNotificationSubscriptions,
+            "capturePushNotificationOpened": plistCapturePushNotificationOpened,
         ])
     }
 
-    private static func setupPostHog(_ posthogConfig: [String: Any]) {
-        guard let instance = PosthogFlutterPlugin.instance else {
+    // `anchor` is the engine that called setup(); the static `instance` is only the
+    // Info.plist auto-setup fallback. Resolving from `instance` would bind the mint
+    // route to whichever engine registered last.
+    private static func setupPostHog(_ posthogConfig: [String: Any], anchor: PosthogFlutterPlugin? = nil) {
+        guard let instance = anchor ?? PosthogFlutterPlugin.instance else {
             print("[PostHog] Plugin instance not found!")
             return
         }
@@ -149,6 +221,16 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
                 break
             }
         }
+        if let compression = posthogConfig["compression"] as? String {
+            switch compression {
+            case "gzip":
+                config.compression = .gzip
+            case "none":
+                config.compression = .none
+            default:
+                break
+            }
+        }
         if let dataMode = posthogConfig["dataMode"] as? String {
             switch dataMode {
             case "wifi":
@@ -162,6 +244,21 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             }
         }
         #if os(iOS)
+            if let rageClickConfigMap = posthogConfig["rageClickConfig"] as? [String: Any] {
+                if let enabled = rageClickConfigMap["enabled"] as? Bool {
+                    config.rageClickConfig.enabled = enabled
+                }
+                if let thresholdPoints = rageClickConfigMap["thresholdPoints"] as? NSNumber {
+                    config.rageClickConfig.thresholdPoints = CGFloat(thresholdPoints.doubleValue)
+                }
+                if let timeoutInterval = rageClickConfigMap["timeoutInterval"] as? NSNumber {
+                    config.rageClickConfig.timeoutInterval = timeoutInterval.doubleValue
+                }
+                if let minimumTapCount = rageClickConfigMap["minimumTapCount"] as? NSNumber {
+                    config.rageClickConfig.minimumTapCount = minimumTapCount.intValue
+                }
+            }
+
             // configure session replay
             if let sessionReplay = posthogConfig["sessionReplay"] as? Bool {
                 config.sessionReplay = sessionReplay
@@ -169,10 +266,29 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             // disabled since Dart has native libs such as http/dio and dont use the ios URLSession
             config.sessionReplayConfig.captureNetworkTelemetry = false
 
-            if let sessionReplayConfigMap = posthogConfig["sessionReplayConfig"] as? [String: Any],
-               let sampleRate = sessionReplayConfigMap["sampleRate"] as? NSNumber
-            {
-                config.sessionReplayConfig.sampleRate = sampleRate
+            if let sessionReplayConfigMap = posthogConfig["sessionReplayConfig"] as? [String: Any] {
+                config.sessionReplayConfig.captureTouches = sessionReplayConfigMap["captureTouches"] as? Bool ?? true
+                if let sampleRate = sessionReplayConfigMap["sampleRate"] as? NSNumber {
+                    config.sessionReplayConfig.sampleRate = sampleRate
+                }
+                if let throttleDelayMs = sessionReplayConfigMap["throttleDelayMs"] as? NSNumber {
+                    config.sessionReplayConfig.throttleDelay = throttleDelayMs.doubleValue / 1000
+                }
+                let captureNativeScreens =
+                    sessionReplayConfigMap["captureNativeScreens"] as? Bool ?? false
+                // Unconditional: only bridged captures read these, so a runtime
+                // bridge toggle honors them.
+                if let maskAllTexts = sessionReplayConfigMap["maskAllTexts"] as? Bool {
+                    config.sessionReplayConfig.maskAllTextInputs = maskAllTexts
+                }
+                if let maskAllImages = sessionReplayConfigMap["maskAllImages"] as? Bool {
+                    config.sessionReplayConfig.maskAllImages = maskAllImages
+                }
+                if config.sessionReplay, captureNativeScreens {
+                    PosthogFlutterPlugin.instance?.startOcclusionDetector()
+                } else {
+                    PosthogFlutterPlugin.instance?.disableOcclusionDetector()
+                }
             }
 
             // configure surveys
@@ -205,6 +321,121 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             if let inAppByDefault = errorConfig["inAppByDefault"] as? Bool {
                 config.errorTrackingConfig.inAppByDefault = inAppByDefault
             }
+
+            if let exceptionSteps = errorConfig["exceptionSteps"] as? [String: Any] {
+                if let enabled = exceptionSteps["enabled"] as? Bool {
+                    config.errorTrackingConfig.exceptionSteps.enabled = enabled
+                }
+                if let maxBytes = exceptionSteps["maxBytes"] as? Int {
+                    config.errorTrackingConfig.exceptionSteps.maxBytes = maxBytes
+                }
+            }
+        }
+
+        // Configure logs (beforeSend runs Dart-side). Each field is only present
+        // when the user set it; unset fields keep native defaults.
+        if let logsConfig = posthogConfig["logs"] as? [String: Any] {
+            if let serviceName = logsConfig["serviceName"] as? String {
+                config.logs.serviceName = serviceName
+            }
+            if let serviceVersion = logsConfig["serviceVersion"] as? String {
+                config.logs.serviceVersion = serviceVersion
+            }
+            if let environment = logsConfig["environment"] as? String {
+                config.logs.environment = environment
+            }
+            if let resourceAttributes = logsConfig["resourceAttributes"] as? [String: Any] {
+                config.logs.resourceAttributes = resourceAttributes
+            }
+            if let flushIntervalSeconds = logsConfig["flushIntervalSeconds"] as? Int {
+                config.logs.flushIntervalSeconds = TimeInterval(flushIntervalSeconds)
+            }
+            if let flushAt = logsConfig["flushAt"] as? Int {
+                config.logs.flushAt = flushAt
+            }
+            if let maxBatchSize = logsConfig["maxBatchSize"] as? Int {
+                config.logs.maxBatchSize = maxBatchSize
+            }
+            if let maxBufferSize = logsConfig["maxBufferSize"] as? Int {
+                config.logs.maxBufferSize = maxBufferSize
+            }
+            if let rateCapMaxLogs = logsConfig["rateCapMaxLogs"] as? Int {
+                config.logs.rateCapMaxLogs = rateCapMaxLogs
+            }
+            if let rateCapWindowSeconds = logsConfig["rateCapWindowSeconds"] as? Int {
+                config.logs.rateCapWindowSeconds = TimeInterval(rateCapWindowSeconds)
+            }
+        }
+
+        // Bootstrap precedence and flag layering live in the native SDK; forward values only.
+        if let bootstrap = posthogConfig["bootstrap"] as? [String: Any] {
+            let bootstrapConfig = PostHogBootstrapConfig()
+            bootstrapConfig.distinctId = bootstrap["distinctId"] as? String
+            if let isIdentifiedId = bootstrap["isIdentifiedId"] as? Bool {
+                bootstrapConfig.isIdentifiedId = isIdentifiedId
+            }
+            bootstrapConfig.featureFlags = bootstrap["featureFlags"] as? [String: Any]
+            bootstrapConfig.featureFlagPayloads = bootstrap["featureFlagPayloads"] as? [String: Any]
+            config.bootstrap = bootstrapConfig
+        }
+
+        #if os(iOS) || os(macOS)
+            if let capturePushNotificationSubscriptions = posthogConfig["capturePushNotificationSubscriptions"] as? Bool {
+                config.capturePushNotificationSubscriptions = capturePushNotificationSubscriptions
+            }
+            if let capturePushNotificationOpened = posthogConfig["capturePushNotificationOpened"] as? Bool {
+                config.capturePushNotificationOpened = capturePushNotificationOpened
+            }
+        #endif
+
+        if posthogConfig["pushIdentityProviderEnabled"] as? Bool == true {
+            // Anchor only if unowned: a live owner is never displaced by a secondary
+            // engine's setup(). Every provider-enabled engine is kept as a candidate
+            // so detach can promote a survivor instead of orphaning the route.
+            if let channel = instance.channel,
+               !PosthogFlutterPlugin.pushChannelCandidates.contains(where: { $0 === channel })
+            {
+                PosthogFlutterPlugin.pushChannelCandidates.append(channel)
+            }
+            if PosthogFlutterPlugin.pushChannel == nil {
+                PosthogFlutterPlugin.pushChannel = instance.channel
+            }
+            // Resolved at call time, not captured: the native SDK holds this closure
+            // for the process lifetime, so binding it to the setup-time instance
+            // would go dead once a new engine attaches.
+            config.pushIdentityProvider = { distinctId, appId, completion in
+                DispatchQueue.main.async {
+                    guard let channel = PosthogFlutterPlugin.pushChannel else {
+                        declinePushIdentity(completion, "no Flutter engine attached")
+                        return
+                    }
+                    channel.invokeMethod(
+                        "pushIdentityProvider",
+                        arguments: ["distinctId": distinctId, "appId": appId]
+                    ) { res in
+                        if let token = res as? String {
+                            completion(token)
+                        } else if let error = res as? FlutterError {
+                            declinePushIdentity(
+                                completion,
+                                "pushIdentityProvider threw: \(error.code) \(error.message ?? "")"
+                            )
+                        } else if (res as AnyObject?) === (FlutterMethodNotImplemented as AnyObject) {
+                            declinePushIdentity(
+                                completion,
+                                "pushIdentityProvider not implemented on the Dart side"
+                            )
+                        } else if res == nil || res is NSNull {
+                            completion(nil)
+                        } else {
+                            declinePushIdentity(
+                                completion,
+                                "pushIdentityProvider returned a non-String reply"
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Update SDK name and version
@@ -214,6 +445,7 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
         PostHogSDK.shared.setup(config)
     }
 
+    private var surveyPresentationId: String?
     private var currentSurvey: PostHogDisplaySurvey?
     private var onSurveyShownCallback: OnPostHogSurveyShown?
     private var onSurveyResponseCallback: OnPostHogSurveyResponse?
@@ -239,6 +471,8 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             capture(call, result: result)
         case "screen":
             screen(call, result: result)
+        case "captureLog":
+            captureLog(call, result: result)
         case "alias":
             alias(call, result: result)
         case "distinctId":
@@ -273,14 +507,48 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             flush(result)
         case "captureException":
             captureException(call, result: result)
+        case "addExceptionStep":
+            addExceptionStep(call, result: result)
         case "close":
             close(result)
         case "sendMetaEvent":
             sendMetaEvent(call, result: result)
         case "sendFullSnapshot":
             sendFullSnapshot(call, result: result)
+        case "captureNativeScreenshots":
+            captureNativeScreenshots(call, result: result)
+        case "enableNativeBridge":
+            #if os(iOS)
+                let episode = (call.arguments as? [String: Any])?["episode"] as? Int
+                DispatchQueue.main.async {
+                    // Episode-scoped: a stale enable must not re-arm the bridge
+                    // for an episode Dart never handed off.
+                    let accepted = self.isOccluded
+                        && episode == self.occlusionEpisode
+                        && PostHogSDK.shared.isSessionReplayActive()
+                    if accepted {
+                        self.bridgeEnabled = true
+                        self.nudgeOcclusionDetector()
+                    }
+                    result(accepted)
+                }
+            #else
+                result(false)
+            #endif
+        case "setCaptureNativeScreens":
+            #if os(iOS)
+                let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
+                if enabled {
+                    startOcclusionDetector()
+                } else {
+                    disableOcclusionDetector()
+                }
+            #endif
+            result(nil)
         case "isSessionReplayActive":
             isSessionReplayActive(result: result)
+        case "getSessionReplayState":
+            getSessionReplayState(result: result)
         case "startSessionRecording":
             startSessionRecording(call, result: result)
         case "stopSessionRecording":
@@ -296,6 +564,12 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
                 // surveys only supported on iOS
                 result(nil)
             #endif
+        case "registerPushNotificationToken":
+            registerPushNotificationToken(call, result: result)
+        case "unregisterPushNotificationToken":
+            unregisterPushNotificationToken(result)
+        case "capturePushNotificationOpened":
+            capturePushNotificationOpened(call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -307,6 +581,8 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
     // MARK: - PostHogSurveysDelegate
 
     extension PosthogFlutterPlugin: PostHogSurveysDelegate {
+        public var supportsSurveyResume: Bool { true }
+
         public func renderSurvey(
             _ survey: PostHogDisplaySurvey,
             onSurveyShown: @escaping OnPostHogSurveyShown,
@@ -314,6 +590,8 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             onSurveyClosed: @escaping OnPostHogSurveyClosed
         ) {
             // Store the callbacks and survey for later use
+            let presentation = UUID().uuidString
+            surveyPresentationId = presentation
             currentSurvey = survey
             onSurveyShownCallback = onSurveyShown
             onSurveyResponseCallback = onSurveyResponse
@@ -321,11 +599,17 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
 
             // We don't need to handle the result here
             // All responses will come through the surveyResponse method
-            invokeFlutterMethod("showSurvey", arguments: survey.toDict())
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.surveyPresentationId == presentation else { return }
+                var arguments = survey.toDict()
+                arguments["presentationId"] = presentation
+                self.channel?.invokeMethod("showSurvey", arguments: arguments)
+            }
         }
 
         public func cleanupSurveys() {
             // Reset all survey-related state when the survey feature is stopped
+            surveyPresentationId = nil
             currentSurvey = nil
             onSurveyShownCallback = nil
             onSurveyResponseCallback = nil
@@ -336,11 +620,18 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
         }
 
         private func handleSurveyAction(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-            guard let survey = currentSurvey,
-                  let args = call.arguments as? [String: Any],
+            guard let args = call.arguments as? [String: Any],
                   let type = args["type"] as? String
             else {
                 result(FlutterError(code: "InvalidArguments", message: "Invalid survey action arguments", details: nil))
+                return
+            }
+
+            guard let survey = currentSurvey,
+                  let presentation = surveyPresentationId,
+                  args["presentationId"] as? String == presentation
+            else {
+                result(FlutterError(code: "SurveyInvalidated", message: "Survey presentation is no longer active", details: nil))
                 return
             }
 
@@ -349,7 +640,7 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
                 onSurveyShownCallback?(survey)
             case "response":
                 if let index = args["index"] as? Int,
-                   index < survey.questions.count
+                   index >= 0, index < survey.questions.count
                 {
                     let question = survey.questions[index]
                     let responsePayload = args["response"]
@@ -373,8 +664,12 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
                         var selectedOptions: [String]? = nil
 
                         if choiceQuestion.isMultipleChoice {
-                            // Multiple choice: accept array directly from Flutter
+                            // Multiple choice: accept array directly from Flutter.
+                            // An empty list is a skipped optional question, same as nil.
                             selectedOptions = responsePayload as? [String]
+                            if selectedOptions?.isEmpty == true {
+                                selectedOptions = nil
+                            }
                             surveyResponse = .multipleChoice(selectedOptions)
                         } else {
                             // Single choice: Flutter sends as a list with one element
@@ -398,6 +693,7 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
             case "closed":
                 onSurveyClosedCallback?(survey)
                 // Clear the callbacks after survey is closed
+                surveyPresentationId = nil
                 currentSurvey = nil
                 onSurveyShownCallback = nil
                 onSurveyResponseCallback = nil
@@ -413,6 +709,445 @@ public class PosthogFlutterPlugin: NSObject, FlutterPlugin {
 #endif
 
 extension PosthogFlutterPlugin {
+    private func captureNativeScreenshots(_ call: FlutterMethodCall,
+                                          result: @escaping FlutterResult)
+    {
+        #if os(iOS)
+            guard let args = call.arguments as? [String: Any],
+                  let views = args["views"] as? [[String: Int]]
+            else {
+                result([])
+                return
+            }
+            captureNextNative(views: views, index: 0, acc: []) { results in
+                result(results)
+            }
+        #else
+            result([])
+        #endif
+    }
+
+    #if os(iOS)
+        private func captureOneNative(x: Int, y: Int, width: Int, height: Int,
+                                      onResult: @escaping (FlutterStandardTypedData?) -> Void)
+        {
+            DispatchQueue.main.async {
+                guard let window = self.captureWindow() else {
+                    onResult(nil)
+                    return
+                }
+
+                // If a native VC is presented over Flutter (paywall, system sheet,
+                // etc.) Flutter has no widget rects for it, so capturing would
+                // include unmasked native content. Fall back to Flutter-only.
+                if window.rootViewController?.presentedViewController != nil {
+                    onResult(nil)
+                    return
+                }
+
+                let cropRect = CGRect(x: x, y: y, width: width, height: height)
+                    .intersection(window.bounds)
+                guard !cropRect.isNull, !cropRect.isEmpty else {
+                    onResult(nil)
+                    return
+                }
+
+                // Only reveal a web view that the capture rect fully covers, and
+                // snapshot only the crop region. Requiring containment (not mere
+                // intersection) stops a neighboring MASKED web view that overlaps
+                // this captured view's rect from being snapshotted and leaked.
+                if let webView = self.findWKWebView(in: window, containedBy: cropRect) {
+                    let config = WKSnapshotConfiguration()
+                    config.rect = webView.convert(cropRect, from: nil).intersection(webView.bounds)
+                    guard !config.rect.isNull, !config.rect.isEmpty else {
+                        onResult(nil)
+                        return
+                    }
+                    webView.takeSnapshot(with: config) { snapshotImage, error in
+                        guard error == nil, let snapshotImage = snapshotImage else {
+                            onResult(nil)
+                            return
+                        }
+                        onResult(self.imageToRawRgba(snapshotImage).map(FlutterStandardTypedData.init(bytes:)))
+                    }
+                    return
+                }
+
+                // No WKWebView found for the captured rect. Returning nil here
+                // keeps this safe: drawHierarchy over the full window would
+                // include any masked CALayer-backed platform view overlapping
+                // the crop region and leak it into replay.
+                onResult(nil)
+            }
+        }
+
+        private func captureNextNative(views: [[String: Int]], index: Int,
+                                       acc: [FlutterStandardTypedData?],
+                                       completion: @escaping ([FlutterStandardTypedData?]) -> Void)
+        {
+            guard index < views.count else {
+                completion(acc)
+                return
+            }
+            let v = views[index]
+            let x = v["x"] ?? 0
+            let y = v["y"] ?? 0
+            let width = v["width"] ?? 0
+            let height = v["height"] ?? 0
+            captureOneNative(x: x, y: y, width: width, height: height) { bytes in
+                self.captureNextNative(views: views, index: index + 1, acc: acc + [bytes], completion: completion)
+            }
+        }
+
+        private func imageToRawRgba(_ image: UIImage) -> Data? {
+            guard let cgImage = image.cgImage else { return nil }
+            // image.size is in points; cgImage.width/height are physical pixels (2×/3× on Retina).
+            // Dart decodes at logical-pixel dimensions, so the buffer must be point-sized.
+            let width = Int(image.size.width)
+            let height = Int(image.size.height)
+            let bytesPerRow = width * 4
+            var buffer = [UInt8](repeating: 0, count: height * bytesPerRow)
+            guard let context = CGContext(
+                data: &buffer,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { return nil }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+            return Data(buffer)
+        }
+
+        private func captureWindow() -> UIWindow? {
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+            // Prefer the window hosting Flutter: the key window can be a
+            // foreign overlay (or the occluding screen itself), and searching
+            // it would miss the platform views embedded in the Flutter tree.
+            return windows.first(where: {
+                Self.containsFlutterViewController($0.rootViewController)
+            })
+                ?? windows.first(where: \.isKeyWindow)
+                ?? UIApplication.shared.windows.first
+        }
+
+        private func findWKWebView(in view: UIView, containedBy rect: CGRect) -> WKWebView? {
+            if let webView = view as? WKWebView {
+                let frameInWindow = webView.convert(webView.bounds, to: nil)
+                // 1pt slack absorbs rounding between Flutter's rect and the native frame.
+                if rect.insetBy(dx: -1, dy: -1).contains(frameInWindow) {
+                    return webView
+                }
+            }
+            for sub in view.subviews {
+                if let found = findWKWebView(in: sub, containedBy: rect) {
+                    return found
+                }
+            }
+            return nil
+        }
+    #endif
+
+    // The occlusion timer retains its closure until invalidated; without this
+    // it would survive engine detach and push zombie occlusion events.
+    public func detachFromEngine(for _: FlutterPluginRegistrar) {
+        if let channel = channel {
+            // Detach runs on whichever thread releases the engine. Capturing the
+            // channel keeps it alive across the hop, so `===` can't match a
+            // recycled address.
+            DispatchQueue.main.async {
+                PosthogFlutterPlugin.pushChannelCandidates.removeAll { $0 === channel }
+                if PosthogFlutterPlugin.pushChannel === channel {
+                    // Promote the most recent surviving provider-enabled engine (nil when none).
+                    PosthogFlutterPlugin.pushChannel = PosthogFlutterPlugin.pushChannelCandidates.last
+                }
+            }
+        }
+        #if os(iOS)
+            DispatchQueue.main.async { [weak self] in
+                self?.stopOcclusionDetector()
+            }
+        #endif
+    }
+
+    #if os(iOS)
+        func startOcclusionDetector() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.occlusionTimer == nil else { return }
+                let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+                    self?.occlusionTick()
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                self.occlusionTimer = timer
+                // Event-driven nudge: an own-window paywall (Superwall-style) is
+                // caught within a frame, not on the next poll, so covered frames
+                // don't leak at episode start. Same-window modal has no global
+                // hook, so it still relies on the ~1 s poll.
+                for name in [UIWindow.didBecomeVisibleNotification, UIWindow.didBecomeKeyNotification] {
+                    NotificationCenter.default.addObserver(
+                        self,
+                        selector: #selector(self.nudgeOcclusionDetector),
+                        name: name,
+                        object: nil
+                    )
+                }
+            }
+        }
+
+        func stopOcclusionDetector() {
+            heldWhileInactive = false
+            notOccludedTicks = 0
+            occlusionTimer?.invalidate()
+            occlusionTimer = nil
+            NotificationCenter.default.removeObserver(self, name: UIWindow.didBecomeVisibleNotification, object: nil)
+            NotificationCenter.default.removeObserver(self, name: UIWindow.didBecomeKeyNotification, object: nil)
+        }
+
+        /// For a setup() re-run that drops the feature: unlike a bare stop,
+        /// ends any active episode, otherwise Dart never learns and keeps its
+        /// capture suppressed.
+        func disableOcclusionDetector() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.stopOcclusionDetector()
+                if self.isOccluded || self.bridgeEnabled {
+                    self.isOccluded = false
+                    self.bridgeEnabled = false
+                    self.bridgeEpisodeStarted = false
+                    self.bridgeFailureStrikes = 0
+                    self.pushOcclusionEvent(occluded: false)
+                }
+            }
+        }
+
+        // Notifications fire on main; the guard drops a stray one after stop.
+        @objc private func nudgeOcclusionDetector() {
+            guard occlusionTimer != nil else { return }
+            occlusionTick()
+        }
+
+        private func pushOcclusionEvent(occluded: Bool, bridgeFailed: Bool = false) {
+            channel?.invokeMethod(
+                "onNativeOcclusionChanged",
+                arguments: [
+                    "occluded": occluded,
+                    "episode": occlusionEpisode,
+                    "bridgeFailed": bridgeFailed,
+                ]
+            )
+        }
+
+        private func occlusionTick() {
+            // Freeze while not active: the SDK only snapshots foreground-active
+            // windows, so every capture would fail and burn the episode's
+            // pre-first-frame strikes during app switches or backgrounding.
+            guard UIApplication.shared.applicationState == .active else {
+                return
+            }
+            guard PostHogSDK.shared.isSessionReplayActive() else {
+                if isOccluded || bridgeEnabled {
+                    // Replay reads inactive across a session boundary — reset(),
+                    // or a close()/setup() pair — until its flags reload lands, and
+                    // that is not the episode ending. Ending here would lift Dart's
+                    // capture suppression under a live native cover. Unbounded on
+                    // purpose: nothing is captured while replay is off, so the hold
+                    // costs no frames, and the cover going away ends the episode
+                    // either way.
+                    if Self.isFlutterOccluded() {
+                        heldWhileInactive = true
+                        // A blip seen before the hold is deliberately not carried
+                        // across it, so it cannot signal a cover swap later.
+                        notOccludedTicks = 0
+                        return
+                    } else if notOccludedTicks < Self.endDebounceTicks {
+                        // The same end-debounce the active path applies, because a
+                        // native→native handoff's first not-occluded read can land
+                        // on either side of the boundary.
+                        notOccludedTicks += 1
+                        return
+                    }
+                    isOccluded = false
+                    bridgeEnabled = false
+                    bridgeEpisodeStarted = false
+                    bridgeFailureStrikes = 0
+                    // Dart must learn the episode ended, otherwise the next
+                    // occluded=true push looks like unchanged state.
+                    pushOcclusionEvent(occluded: false)
+                }
+                heldWhileInactive = false
+                return
+            }
+            let resumedFromHold = heldWhileInactive
+            heldWhileInactive = false
+            let occluded = Self.isFlutterOccluded()
+            // Debounce END only: a native→native handoff briefly reads
+            // not-occluded; ending the episode there would flash a stale frame.
+            if !occluded, isOccluded, notOccludedTicks < Self.endDebounceTicks {
+                notOccludedTicks += 1
+                return
+            }
+            // Occluded again after a blip = the cover was swapped. The old
+            // cover's bridge grant must not carry over; re-handshake under a
+            // new episode id. No end event, so Dart's suppression never lapses.
+            //
+            // A hold that ends with the cover still up and no bridge re-handshakes
+            // for the same reason: the enable was refused while replay was off (it
+            // requires an active recording), so without this Dart keeps showing a
+            // placeholder it emitted for an episode the SDK has since stopped
+            // recording, and nothing replaces it until the cover goes away.
+            let resumedUnbridged = resumedFromHold && !bridgeEnabled
+            let coverSwapped = occluded && isOccluded && (notOccludedTicks > 0 || resumedUnbridged)
+            notOccludedTicks = 0
+            if occluded != isOccluded {
+                isOccluded = occluded
+                if occluded {
+                    occlusionEpisode += 1
+                } else {
+                    bridgeEnabled = false
+                    bridgeEpisodeStarted = false
+                }
+                bridgeFailureStrikes = 0
+                pushOcclusionEvent(occluded: occluded)
+            } else if coverSwapped {
+                occlusionEpisode += 1
+                bridgeEnabled = false
+                bridgeEpisodeStarted = false
+                bridgeFailureStrikes = 0
+                pushOcclusionEvent(occluded: true)
+            }
+            if occluded, bridgeEnabled {
+                // First capture of an episode settles the presentation with
+                // afterScreenUpdates; steady-state ticks avoid it because it
+                // visibly flickers secure text fields.
+                let isFirst = !bridgeEpisodeStarted
+                if PostHogSDK.shared.captureSessionReplaySnapshot(episodeFirstFrame: isFirst) {
+                    bridgeEpisodeStarted = true
+                    bridgeFailureStrikes = 0
+                } else if !bridgeEpisodeStarted {
+                    // Demotion is gated on the episode never having delivered:
+                    // captures fail transiently during interaction (mid-transition
+                    // skips), so demoting a working episode would swap real frames
+                    // for the fallback. After first delivery, failures just hold
+                    // the last good frame.
+                    bridgeFailureStrikes += 1
+                    if bridgeFailureStrikes >= Self.bridgeFailureStrikeLimit {
+                        bridgeEnabled = false
+                        pushOcclusionEvent(occluded: true, bridgeFailed: true)
+                    }
+                }
+            }
+        }
+
+        /// Whether the Flutter surface is NOT what the user currently sees,
+        /// evaluated live — no cached identities. Single windows pass per tick.
+        private static func isFlutterOccluded() -> Bool {
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+            guard let flutterWindow = windows.first(where: {
+                containsFlutterViewController($0.rootViewController)
+            }) else {
+                // Fail open: without a Flutter window there is nothing to blank.
+                return false
+            }
+            // Walk the whole presentation chain: native SDKs routinely present
+            // full-screen from the top of an existing chain. A single geometric
+            // + opacity test covers every presentation style: popovers, alerts,
+            // and portrait sheets fail the coverage check; full-screen covers
+            // (including compact-height sheets) pass it.
+            var top = flutterWindow.rootViewController
+            while let presented = top?.presentedViewController {
+                if let view = presented.view,
+                   Self.containsOpaqueCoveringView(view, window: flutterWindow)
+                {
+                    return true
+                }
+                top = presented
+            }
+            // An SDK-owned window made key above Flutter (e.g. Superwall
+            // presents its paywall in its own UIWindow + makeKeyAndVisible).
+            // It must actually cover the screen with opaque content —
+            // floating-button, banner, or transparent passthrough windows that
+            // hold key status do not count. Scoped to the Flutter window's
+            // scene: on multi-scene (iPad) apps another scene's key window
+            // does not cover this one.
+            let sceneWindows = flutterWindow.windowScene?.windows ?? windows
+            if let keyWindow = sceneWindows.first(where: \.isKeyWindow),
+               keyWindow !== flutterWindow,
+               !isSystemWindow(keyWindow),
+               coversScreen(keyWindow),
+               containsOpaqueCoveringView(keyWindow, window: keyWindow)
+            {
+                return true
+            }
+            return false
+        }
+
+        /// Whether [view]'s tree contains an opaque view that covers the
+        /// window — a hierarchy test, because a single-view background check
+        /// misses the common clear-container-with-opaque-child pattern of
+        /// payment/auth SDKs. isOpaque is a rendering hint (defaults true), so
+        /// only background-color alpha counts. Known bias: covers drawn purely
+        /// by layers (camera previews) without an opaque background are missed
+        /// and fall back to pre-feature stale-frame behavior.
+        private static func containsOpaqueCoveringView(
+            _ view: UIView,
+            window: UIWindow,
+            depth: Int = 0
+        ) -> Bool {
+            // Depth bound is a runaway guard, not a search budget — complex
+            // SDK view trees nest far deeper than a handful of levels, and a
+            // missed opaque cover silently disables the feature for that
+            // screen. The walk early-exits on the first hit.
+            guard depth <= 16, !view.isHidden, view.alpha >= 0.99 else {
+                return false
+            }
+            let frameInWindow = view.convert(view.bounds, to: window)
+            let windowArea = window.bounds.width * window.bounds.height
+            guard windowArea > 0 else { return false }
+            let covered = frameInWindow.intersection(window.bounds)
+            let coversBounds = (covered.width * covered.height) >= windowArea * 0.95
+            if coversBounds,
+               let background = view.backgroundColor,
+               background.cgColor.alpha >= 0.99
+            {
+                return true
+            }
+            // A child can cover even when its container is clear.
+            return view.subviews.contains {
+                containsOpaqueCoveringView($0, window: window, depth: depth + 1)
+            }
+        }
+    #endif
+
+    #if os(iOS)
+        private static func containsFlutterViewController(_ viewController: UIViewController?) -> Bool {
+            guard let viewController else {
+                return false
+            }
+            if viewController is FlutterViewController {
+                return true
+            }
+            return viewController.children.contains { $0 is FlutterViewController }
+        }
+
+        private static func isSystemWindow(_ window: UIWindow) -> Bool {
+            let className = String(describing: type(of: window))
+            return className.contains("Keyboard") || className.contains("TextEffects")
+        }
+
+        private static func coversScreen(_ window: UIWindow) -> Bool {
+            guard !window.isHidden, window.alpha > 0.01 else { return false }
+            let screen = window.screen.bounds.size
+            guard screen.width > 0, screen.height > 0 else { return false }
+            let size = window.frame.size
+            return size.width >= screen.width * 0.95 && size.height >= screen.height * 0.95
+        }
+    #endif
+
     private func sendMetaEvent(_ call: FlutterMethodCall,
                                result: @escaping FlutterResult)
     {
@@ -465,15 +1200,17 @@ extension PosthogFlutterPlugin {
                 }
 
                 dispatchQueue.async {
-                    guard let image = UIImage(data: imageBytes.data) else {
-                        // bad data but we cannot do this in the calling thread
-                        // otherwise we are doing slow operatios in the main thread
-                        return
-                    }
-
-                    guard let base64 = imageToBase64(image) else {
-                        // bad data but we cannot do this in the calling thread
-                        // otherwise we are doing slow operatios in the main thread
+                    // Reply only once the frame is captured: Dart marks a frame
+                    // delivered on success, and a delivered frame is not re-sent
+                    // while the pixels stay the same.
+                    guard let image = UIImage(data: imageBytes.data),
+                          let base64 = imageToBase64(image)
+                    else {
+                        DispatchQueue.main.async {
+                            result(FlutterError(code: "PosthogFlutterException",
+                                                message: "Could not encode the replay snapshot",
+                                                details: nil))
+                        }
                         return
                     }
 
@@ -498,9 +1235,8 @@ extension PosthogFlutterPlugin {
                     snapshotsData.append(snapshotData)
 
                     PostHogSDK.shared.capture("$snapshot", properties: ["$snapshot_source": "mobile", "$snapshot_data": snapshotsData], timestamp: date)
+                    DispatchQueue.main.async { result(nil) }
                 }
-
-                result(nil)
             } else {
                 _badArgumentError(result)
             }
@@ -514,6 +1250,23 @@ extension PosthogFlutterPlugin {
             result(PostHogSDK.shared.isSessionReplayActive())
         #else
             result(false)
+        #endif
+    }
+
+    private func getSessionReplayState(result: @escaping FlutterResult) {
+        #if os(iOS)
+            // Neither read mutates session state: getSessionId() is hard-wired
+            // readOnly: true, matching peekSessionId() on Android. The send still
+            // resolves the session and so still applies expiry.
+            var state: [String: Any] = [
+                "isActive": PostHogSDK.shared.isSessionReplayActive(),
+            ]
+            if let sessionId = PostHogSDK.shared.getSessionId() {
+                state["sessionId"] = sessionId
+            }
+            result(state)
+        #else
+            result(["isActive": false])
         #endif
     }
 
@@ -566,7 +1319,7 @@ extension PosthogFlutterPlugin {
         result: @escaping FlutterResult
     ) {
         if let args = call.arguments as? [String: Any] {
-            PosthogFlutterPlugin.setupPostHog(args)
+            PosthogFlutterPlugin.setupPostHog(args, anchor: self)
             result(nil)
         } else {
             _badArgumentError(result)
@@ -608,7 +1361,7 @@ extension PosthogFlutterPlugin {
         if let args = call.arguments as? [String: Any],
            let featureFlagKey = args["key"] as? String
         {
-            let value = PostHogSDK.shared.getFeatureFlagPayload(featureFlagKey)
+            let value = PostHogSDK.shared.getFeatureFlagResult(featureFlagKey, sendFeatureFlagEvent: false)?.payload
             result(value)
         } else {
             _badArgumentError(result)
@@ -716,6 +1469,50 @@ extension PosthogFlutterPlugin {
             result(nil)
         } else {
             _badArgumentError(result)
+        }
+    }
+
+    private func captureLog(
+        _ call: FlutterMethodCall,
+        result: @escaping FlutterResult
+    ) {
+        if let args = call.arguments as? [String: Any],
+           let body = args["body"] as? String
+        {
+            let level = args["level"] as? String ?? "info"
+            let attributes = args["attributes"] as? [String: Any]
+            let traceId = args["traceId"] as? String
+            let spanId = args["spanId"] as? String
+            // traceFlags 0 is meaningful (W3C sampled-false); nil omits it.
+            let traceFlags = args["traceFlags"] as? Int
+            // PostHogLogSeverity.from(name:) is internal in the SDK, so map the
+            // wire string here. Unknown levels fall back to .info.
+            let severity = severityFromString(level)
+            PostHogSDK.shared.captureLog(
+                body,
+                level: severity,
+                attributes: attributes,
+                traceId: traceId,
+                spanId: spanId,
+                traceFlags: traceFlags
+            )
+            result(nil)
+        } else {
+            _badArgumentError(result)
+        }
+    }
+
+    // Maps the wire level to PostHogLogSeverity using only public enum cases
+    // (the SDK's `from(name:)` is internal). Unknown levels fall back to .info.
+    private func severityFromString(_ level: String) -> PostHogLogSeverity {
+        switch level.lowercased() {
+        case "trace": return .trace
+        case "debug": return .debug
+        case "info": return .info
+        case "warn": return .warn
+        case "error": return .error
+        case "fatal": return .fatal
+        default: return .info
         }
     }
 
@@ -881,6 +1678,62 @@ extension PosthogFlutterPlugin {
         result(nil)
     }
 
+    private func registerPushNotificationToken(
+        _ call: FlutterMethodCall,
+        result: @escaping FlutterResult
+    ) {
+        #if os(iOS)
+            if let args = call.arguments as? [String: Any],
+               let deviceToken = args["deviceToken"] as? String,
+               // A blank token is dropped silently by the native SDK, so surface
+               // it here like the missing case instead of reporting false success.
+               !deviceToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                // Match the Android bridge: a blank appId means "not provided", so the
+                // native SDK falls back to the bundle id instead of silently no-oping.
+                let trimmedAppId = (args["appId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let appId = (trimmedAppId?.isEmpty ?? true) ? nil : trimmedAppId
+                PostHogSDK.shared.registerPushNotificationToken(deviceToken, appId: appId)
+                result(nil)
+            } else {
+                _badArgumentError(result)
+            }
+        #else
+            result(nil)
+        #endif
+    }
+
+    private func unregisterPushNotificationToken(_ result: @escaping FlutterResult) {
+        #if os(iOS)
+            PostHogSDK.shared.unregisterPushNotificationToken()
+            result(nil)
+        #else
+            result(nil)
+        #endif
+    }
+
+    private func capturePushNotificationOpened(
+        _ call: FlutterMethodCall,
+        result: @escaping FlutterResult
+    ) {
+        #if os(iOS) || os(macOS)
+            guard let args = call.arguments as? [String: Any] else {
+                _badArgumentError(result)
+                return
+            }
+            PostHogSDK.shared.capturePushNotificationOpened(
+                title: args["title"] as? String,
+                subtitle: args["subtitle"] as? String,
+                body: args["body"] as? String,
+                payload: args["payload"] as? [String: Any],
+                action: args["action"] as? String
+            )
+            result(nil)
+        #else
+            result(nil)
+        #endif
+    }
+
     private func captureException(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard let arguments = call.arguments as? [String: Any] else {
             result(FlutterError(code: "INVALID_ARGUMENTS", message: "Invalid arguments for captureException", details: nil))
@@ -897,6 +1750,19 @@ extension PosthogFlutterPlugin {
 
         // Use capture method with timestamp to ensure Flutter timestamp is used
         PostHogSDK.shared.capture("$exception", properties: properties, timestamp: timestamp)
+        result(nil)
+    }
+
+    private func addExceptionStep(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let message = arguments["message"] as? String
+        else {
+            _badArgumentError(result)
+            return
+        }
+
+        let properties = arguments["properties"] as? [String: Any]
+        PostHogSDK.shared.addExceptionStep(message, properties: properties)
         result(nil)
     }
 
