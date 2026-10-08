@@ -1,9 +1,30 @@
 package com.posthog.flutter
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.os.BadParcelableException
+import com.google.firebase.FirebaseApp
+import com.posthog.PostHogCompression
+import com.posthog.android.replay.PostHogScreenshotColorMode
+import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.PluginRegistry
+import io.flutter.plugin.common.StandardMethodCodec
+import org.mockito.ArgumentCaptor
 import org.mockito.Mockito
+import java.nio.ByteBuffer
+import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 /*
  * This demonstrates a simple unit test of the Kotlin portion of this plugin's implementation.
@@ -14,6 +35,11 @@ import kotlin.test.Test
  */
 
 internal class PosthogFlutterPluginTest {
+    @BeforeTest
+    fun resetSharedRoute() {
+        PosthogFlutterPlugin.resetPushIdentityRouteForTesting()
+    }
+
     @Test
     fun onMethodCall_identify_returnsExpectedValue() {
         val plugin = PosthogFlutterPlugin()
@@ -24,7 +50,7 @@ internal class PosthogFlutterPluginTest {
         val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
         plugin.onMethodCall(call, mockResult)
 
-        Mockito.verify(mockResult).success(true)
+        Mockito.verify(mockResult).success(null)
     }
 
     @Test
@@ -37,7 +63,321 @@ internal class PosthogFlutterPluginTest {
         val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
         plugin.onMethodCall(call, mockResult)
 
-        Mockito.verify(mockResult).success(true)
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun onMethodCall_sendMetaEvent_acknowledgesDetachedWorkWithoutSynchronousAttachedReply() {
+        val plugin = PosthogFlutterPlugin()
+        val binding = attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+
+        val call = MethodCall("sendMetaEvent", mapOf("width" to 10, "height" to 20, "screen" to "Home"))
+
+        // The stubbed looper drops posts; this case only checks submission.
+        val whileAttached: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, whileAttached)
+        Mockito.verify(whileAttached, Mockito.never()).success(null)
+
+        plugin.onDetachedFromEngine(binding)
+
+        val afterDetach: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, afterDetach)
+        Mockito.verify(afterDetach).success(null)
+
+        // No immediate drop reply proves the executor was recreated.
+        plugin.onAttachedToEngine(binding)
+        val afterReattach: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, afterReattach)
+        Mockito.verify(afterReattach, Mockito.never()).success(null)
+        plugin.onDetachedFromEngine(binding)
+    }
+
+    @Test
+    fun onMethodCall_setCaptureNativeScreens_returnsSuccess() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call = MethodCall("setCaptureNativeScreens", mapOf("enabled" to false))
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun setup_captureTouches_defaultsToTrue() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+        plugin.onMethodCall(
+            MethodCall("setup", mapOf("projectToken" to "test-token", "sessionReplayConfig" to emptyMap<String, Any>())),
+            Mockito.mock(MethodChannel.Result::class.java),
+        )
+        assertTrue(assertNotNull(plugin.lastBuiltConfig).sessionReplayConfig.captureTouches)
+    }
+
+    @Test
+    fun setup_captureTouches_forwardsFalseWithoutDisablingReplay() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+        plugin.onMethodCall(
+            MethodCall(
+                "setup",
+                mapOf(
+                    "projectToken" to "test-token",
+                    "sessionReplay" to true,
+                    "sessionReplayConfig" to mapOf("captureTouches" to false),
+                ),
+            ),
+            Mockito.mock(MethodChannel.Result::class.java),
+        )
+        val config = assertNotNull(plugin.lastBuiltConfig)
+        assertFalse(config.sessionReplayConfig.captureTouches)
+        assertTrue(config.sessionReplay)
+    }
+
+    @Test
+    fun setup_verifyScreenshotMaskAlignment_defaultsToFalse() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+
+        val call =
+            MethodCall(
+                "setup",
+                mapOf(
+                    "projectToken" to "test-token",
+                    "sessionReplay" to true,
+                    "sessionReplayConfig" to emptyMap<String, Any>(),
+                ),
+            )
+        plugin.onMethodCall(call, Mockito.mock(MethodChannel.Result::class.java))
+
+        assertFalse(assertNotNull(plugin.lastBuiltConfig).sessionReplayConfig.verifyScreenshotMaskAlignment)
+    }
+
+    @Test
+    fun setup_verifyScreenshotMaskAlignment_forwardsTrue() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+
+        val call =
+            MethodCall(
+                "setup",
+                mapOf(
+                    "projectToken" to "test-token",
+                    "sessionReplay" to true,
+                    "sessionReplayConfig" to mapOf("verifyScreenshotMaskAlignment" to true),
+                ),
+            )
+        plugin.onMethodCall(call, Mockito.mock(MethodChannel.Result::class.java))
+
+        assertTrue(assertNotNull(plugin.lastBuiltConfig).sessionReplayConfig.verifyScreenshotMaskAlignment)
+    }
+
+    @Test
+    fun setup_throttleDelayMs_forwardsToNativeReplayConfig() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+
+        val call =
+            MethodCall(
+                "setup",
+                mapOf(
+                    "projectToken" to "test-token",
+                    "sessionReplay" to true,
+                    "sessionReplayConfig" to mapOf("throttleDelayMs" to 2500),
+                ),
+            )
+        plugin.onMethodCall(call, Mockito.mock(MethodChannel.Result::class.java))
+
+        assertEquals(2500L, assertNotNull(plugin.lastBuiltConfig).sessionReplayConfig.throttleDelayMs)
+    }
+
+    @Test
+    fun setup_compression_defaultsToGzip() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+
+        val call =
+            MethodCall(
+                "setup",
+                mapOf("projectToken" to "test-token"),
+            )
+        plugin.onMethodCall(call, Mockito.mock(MethodChannel.Result::class.java))
+
+        assertEquals(PostHogCompression.GZIP, assertNotNull(plugin.lastBuiltConfig).compression)
+    }
+
+    @Test
+    fun setup_compression_none_forwardsToNativeConfig() {
+        val plugin = PosthogFlutterPlugin()
+        attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+
+        val call =
+            MethodCall(
+                "setup",
+                mapOf(
+                    "projectToken" to "test-token",
+                    "compression" to "none",
+                ),
+            )
+        plugin.onMethodCall(call, Mockito.mock(MethodChannel.Result::class.java))
+
+        assertEquals(PostHogCompression.NONE, assertNotNull(plugin.lastBuiltConfig).compression)
+    }
+
+    @Test
+    fun setup_screenshotControls_preserveDefaults() {
+        val plugin = PosthogFlutterPlugin()
+        val binding = attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+        try {
+            plugin.onMethodCall(
+                MethodCall(
+                    "setup",
+                    mapOf(
+                        "projectToken" to "test-token",
+                        "sessionReplay" to true,
+                        "sessionReplayConfig" to emptyMap<String, Any>(),
+                    ),
+                ),
+                Mockito.mock(MethodChannel.Result::class.java),
+            )
+
+            val replay = assertNotNull(plugin.lastBuiltConfig).sessionReplayConfig
+            assertEquals(1f, replay.screenshotScale)
+            assertEquals(30, replay.screenshotCompressionQuality)
+            assertEquals(PostHogScreenshotColorMode.ARGB_8888, replay.screenshotColorMode)
+        } finally {
+            plugin.onDetachedFromEngine(binding)
+        }
+    }
+
+    @Test
+    fun setup_screenshotControls_forwardValuesAndNativeClamping() {
+        for ((scale, quality) in listOf(0.333 to 75, 0.0 to -1, 2.0 to 101)) {
+            val plugin = PosthogFlutterPlugin()
+            val binding = attach(plugin, Mockito.mock(BinaryMessenger::class.java))
+            try {
+                plugin.onMethodCall(
+                    MethodCall(
+                        "setup",
+                        mapOf(
+                            "projectToken" to "test-token",
+                            "sessionReplay" to true,
+                            "sessionReplayConfig" to
+                                mapOf(
+                                    "captureNativeScreens" to true,
+                                    "screenshotScale" to scale,
+                                    "screenshotCompressionQuality" to quality,
+                                    "screenshotColorMode" to "rgb565",
+                                ),
+                        ),
+                    ),
+                    Mockito.mock(MethodChannel.Result::class.java),
+                )
+
+                val replay = assertNotNull(plugin.lastBuiltConfig).sessionReplayConfig
+                assertEquals(scale.toFloat().coerceIn(0.1f, 1f), replay.screenshotScale)
+                assertEquals(quality.coerceIn(0, 100), replay.screenshotCompressionQuality)
+                assertEquals(PostHogScreenshotColorMode.RGB_565, replay.screenshotColorMode)
+            } finally {
+                plugin.onDetachedFromEngine(binding)
+            }
+        }
+    }
+
+    @Test
+    fun onMethodCall_captureLog_acknowledgesValidArguments() {
+        val plugin = PosthogFlutterPlugin()
+
+        val arguments =
+            mapOf(
+                "body" to "checkout completed",
+                "level" to "warn",
+                "attributes" to mapOf("order_id" to "ord_789"),
+                "traceId" to "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId" to "00f067aa0ba902b7",
+                "traceFlags" to 1,
+            )
+
+        val call = MethodCall("captureLog", arguments)
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun onMethodCall_captureLog_missingBody_returnsError() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call = MethodCall("captureLog", mapOf<String, Any>())
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).error(
+            Mockito.eq("PosthogFlutterException"),
+            Mockito.any(),
+            Mockito.isNull(),
+        )
+    }
+
+    @Test
+    fun onMethodCall_captureNativeScreenshots_noActivity_returnsEmptyList() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call =
+            MethodCall(
+                "captureNativeScreenshots",
+                mapOf("views" to listOf(mapOf("x" to 0, "y" to 0, "width" to 10, "height" to 10))),
+            )
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(emptyList<ByteArray?>())
+    }
+
+    @Test
+    fun onMethodCall_captureNativeScreenshots_emptyViews_returnsEmptyList() {
+        val plugin = PosthogFlutterPlugin()
+        val binding = Mockito.mock(ActivityPluginBinding::class.java)
+        Mockito.`when`(binding.activity).thenReturn(Mockito.mock(Activity::class.java))
+        plugin.onAttachedToActivity(binding)
+
+        val call = MethodCall("captureNativeScreenshots", mapOf("views" to emptyList<Map<String, Int>>()))
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(emptyList<ByteArray?>())
+    }
+
+    @Test
+    fun onMethodCall_captureNativeScreenshots_zeroDimensionEntry_producesNullInResult() {
+        val plugin = PosthogFlutterPlugin()
+        val binding = Mockito.mock(ActivityPluginBinding::class.java)
+        Mockito.`when`(binding.activity).thenReturn(Mockito.mock(Activity::class.java))
+        plugin.onAttachedToActivity(binding)
+
+        // Zero-dimension guard fires before any activity view access, so
+        // captureNext inserts null and advances without crashing.
+        val call =
+            MethodCall(
+                "captureNativeScreenshots",
+                mapOf(
+                    "views" to
+                        listOf(
+                            mapOf("x" to 0, "y" to 0, "width" to 0, "height" to 10),
+                            mapOf("x" to 0, "y" to 0, "width" to 10, "height" to 0),
+                            mapOf("x" to 0, "y" to 0, "width" to 0, "height" to 0),
+                        ),
+                ),
+            )
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        @Suppress("UNCHECKED_CAST")
+        val captor = org.mockito.ArgumentCaptor.forClass(List::class.java) as org.mockito.ArgumentCaptor<List<ByteArray?>>
+        Mockito.verify(mockResult).success(captor.capture())
+        assertEquals(listOf(null, null, null), captor.value)
+        Mockito.verify(binding.activity, Mockito.never()).findViewById<android.view.View>(android.R.id.content)
     }
 
     @Test
@@ -53,5 +393,533 @@ internal class PosthogFlutterPluginTest {
             Mockito.eq("Missing argument: key"),
             Mockito.isNull(),
         )
+    }
+
+    @Test
+    fun bootstrapConfigFromMap_fullMap_decodesAllFields() {
+        val config =
+            bootstrapConfigFromMap(
+                mapOf(
+                    "distinctId" to "user-123",
+                    "isIdentifiedId" to true,
+                    "featureFlags" to mapOf("beta-ui" to "variant-a", "legacy" to true),
+                    "featureFlagPayloads" to mapOf("beta-ui" to mapOf("color" to "blue")),
+                ),
+            )
+
+        assertEquals("user-123", config.distinctId)
+        assertTrue(config.isIdentifiedId)
+        assertEquals(mapOf("beta-ui" to "variant-a", "legacy" to true), config.featureFlags)
+        assertEquals(mapOf("beta-ui" to mapOf("color" to "blue")), config.featureFlagPayloads)
+    }
+
+    @Test
+    fun bootstrapConfigFromMap_emptyMap_usesDefaults() {
+        val config = bootstrapConfigFromMap(emptyMap())
+
+        assertNull(config.distinctId)
+        assertFalse(config.isIdentifiedId)
+        assertNull(config.featureFlags)
+        assertNull(config.featureFlagPayloads)
+    }
+
+    @Test
+    fun bootstrapConfigFromMap_wrongTypes_fallBackToDefaults() {
+        val config =
+            bootstrapConfigFromMap(
+                mapOf(
+                    "distinctId" to 42,
+                    "isIdentifiedId" to "yes",
+                    "featureFlags" to listOf("beta-ui"),
+                ),
+            )
+
+        assertNull(config.distinctId)
+        assertFalse(config.isIdentifiedId)
+        assertNull(config.featureFlags)
+        assertNull(config.featureFlagPayloads)
+    }
+
+    @Test
+    fun onMethodCall_registerPushNotificationToken_withAppId_returnsSuccess() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call =
+            MethodCall(
+                "registerPushNotificationToken",
+                mapOf("deviceToken" to "token-abc", "appId" to "my-firebase-project"),
+            )
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun onMethodCall_registerPushNotificationToken_missingDeviceToken_returnsError() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call = MethodCall("registerPushNotificationToken", mapOf<String, Any>())
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).error(
+            Mockito.eq("PosthogFlutterException"),
+            Mockito.eq("Missing argument: deviceToken"),
+            Mockito.isNull(),
+        )
+    }
+
+    @Test
+    fun onMethodCall_registerPushNotificationToken_noAppIdAndNoFirebase_reportsSkip() {
+        val plugin = PosthogFlutterPlugin()
+
+        // The FirebaseApp stub isn't initialized, so the reflective project-id
+        // fallback finds nothing; the missing id is reported as an error so Dart
+        // logs the skip instead of seeing a false success.
+        FirebaseApp.projectId = null
+        val call = MethodCall("registerPushNotificationToken", mapOf("deviceToken" to "token-abc"))
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).error(
+            Mockito.eq("PosthogFlutterException"),
+            Mockito.contains("no appId provided"),
+            Mockito.isNull(),
+        )
+        Mockito.verify(mockResult, Mockito.never()).success(Mockito.any())
+    }
+
+    @Test
+    fun onMethodCall_registerPushNotificationToken_noAppIdWithFirebase_returnsSuccess() {
+        val plugin = PosthogFlutterPlugin()
+
+        // With the stub initialized, the reflective fallback resolves a project
+        // id and registration proceeds instead of erroring.
+        FirebaseApp.projectId = "stub-project"
+        try {
+            val call = MethodCall("registerPushNotificationToken", mapOf("deviceToken" to "token-abc"))
+            val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+            plugin.onMethodCall(call, mockResult)
+
+            Mockito.verify(mockResult).success(null)
+            Mockito.verify(mockResult, Mockito.never()).error(Mockito.any(), Mockito.any(), Mockito.any())
+        } finally {
+            FirebaseApp.projectId = null
+        }
+    }
+
+    @Test
+    fun onMethodCall_registerPushNotificationToken_blankDeviceToken_returnsError() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call = MethodCall("registerPushNotificationToken", mapOf("deviceToken" to "  "))
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).error(
+            Mockito.eq("PosthogFlutterException"),
+            Mockito.eq("Missing argument: deviceToken"),
+            Mockito.isNull(),
+        )
+        Mockito.verify(mockResult, Mockito.never()).success(Mockito.any())
+    }
+
+    @Test
+    fun onMethodCall_unregisterPushNotificationToken_returnsSuccess() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call = MethodCall("unregisterPushNotificationToken", null)
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun onMethodCall_capturePushNotificationOpened_acceptsIosShapedArguments() {
+        val plugin = PosthogFlutterPlugin()
+
+        // subtitle has no Android counterpart; it must be ignored rather than
+        // rejected, so iOS-shaped calls from shared Dart code still succeed.
+        val call =
+            MethodCall(
+                "capturePushNotificationOpened",
+                mapOf(
+                    "title" to "Title",
+                    "subtitle" to "Subtitle",
+                    "body" to "Body",
+                    "payload" to mapOf("posthog" to """{"campaign_id":"x"}"""),
+                    "action" to "reply",
+                ),
+            )
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun onMethodCall_capturePushNotificationOpened_noArguments_returnsSuccess() {
+        val plugin = PosthogFlutterPlugin()
+
+        val call = MethodCall("capturePushNotificationOpened", mapOf<String, Any>())
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(call, mockResult)
+
+        Mockito.verify(mockResult).success(null)
+    }
+
+    @Test
+    fun onNewIntent_trayTap_isCapturedAndRememberedForSetupToReplay() {
+        val plugin = PosthogFlutterPlugin()
+        val listener = attachActivity(plugin)
+        val captured = recordCaptures(plugin)
+        val intent = trayIntent("m1")
+
+        assertFalse(listener.onNewIntent(intent))
+        assertEquals(listOf<Intent?>(intent), captured)
+        assertSame(intent, plugin.pendingPushIntent)
+    }
+
+    @Test
+    fun onNewIntent_withoutMessageId_isNotRemembered() {
+        val plugin = PosthogFlutterPlugin()
+        val listener = attachActivity(plugin)
+
+        assertFalse(listener.onNewIntent(Mockito.mock(Intent::class.java)))
+        assertNull(plugin.pendingPushIntent)
+    }
+
+    @Test
+    fun onNewIntent_unreadableExtras_isNotRememberedAndDoesNotThrow() {
+        val plugin = PosthogFlutterPlugin()
+        val listener = attachActivity(plugin)
+        val intent = Mockito.mock(Intent::class.java)
+        Mockito
+            .`when`(intent.getStringExtra("google.message_id"))
+            .thenThrow(BadParcelableException("unknown extra class"))
+
+        assertFalse(listener.onNewIntent(intent))
+        assertNull(plugin.pendingPushIntent)
+    }
+
+    @Test
+    fun onNewIntent_secondTrayTap_supersedesTheFirst() {
+        val plugin = PosthogFlutterPlugin()
+        val listener = attachActivity(plugin)
+        val second = trayIntent("m2")
+
+        listener.onNewIntent(trayIntent("m1"))
+        listener.onNewIntent(second)
+
+        assertSame(second, plugin.pendingPushIntent)
+    }
+
+    @Test
+    fun launchIntentReplay_capturesTheRememberedTapOverTheActivityIntent() {
+        val plugin = PosthogFlutterPlugin()
+        val listener = attachActivity(plugin, activityWithIntent(trayIntent("stale-launch")))
+        val captured = recordCaptures(plugin)
+        val tap = trayIntent("m1")
+        listener.onNewIntent(tap)
+
+        plugin.capturePushNotificationOpenedFromLaunchIntent()
+
+        assertSame(tap, captured.last())
+        assertNull(plugin.pendingPushIntent)
+    }
+
+    @Test
+    fun launchIntentReplay_withoutRememberedTap_capturesTheActivityIntent() {
+        val plugin = PosthogFlutterPlugin()
+        val launch = trayIntent("launch")
+        attachActivity(plugin, activityWithIntent(launch))
+        val captured = recordCaptures(plugin)
+
+        plugin.capturePushNotificationOpenedFromLaunchIntent()
+
+        assertEquals(listOf<Intent?>(launch), captured)
+    }
+
+    @Test
+    fun launchIntentReplay_replaysTheRememberedTapOnlyOnce() {
+        val plugin = PosthogFlutterPlugin()
+        val launch = trayIntent("launch")
+        val listener = attachActivity(plugin, activityWithIntent(launch))
+        val captured = recordCaptures(plugin)
+        listener.onNewIntent(trayIntent("m1"))
+
+        plugin.capturePushNotificationOpenedFromLaunchIntent()
+        plugin.capturePushNotificationOpenedFromLaunchIntent()
+
+        assertSame(launch, captured.last())
+    }
+
+    @Test
+    fun onDetachedFromActivity_dropsTheRememberedTap() {
+        val plugin = PosthogFlutterPlugin()
+        val listener = attachActivity(plugin)
+        listener.onNewIntent(trayIntent("m1"))
+
+        plugin.onDetachedFromActivity()
+
+        assertNull(plugin.pendingPushIntent)
+    }
+
+    private fun trayIntent(messageId: String): Intent =
+        Mockito.mock(Intent::class.java).also {
+            Mockito.`when`(it.getStringExtra("google.message_id")).thenReturn(messageId)
+        }
+
+    private fun activityWithIntent(intent: Intent): Activity =
+        Mockito.mock(Activity::class.java).also {
+            Mockito.`when`(it.intent).thenReturn(intent)
+        }
+
+    private fun recordCaptures(plugin: PosthogFlutterPlugin): List<Intent?> =
+        mutableListOf<Intent?>().also { captured ->
+            plugin.capturePushNotificationOpened = { captured += it }
+        }
+
+    private fun attachActivity(
+        plugin: PosthogFlutterPlugin,
+        activity: Activity = Mockito.mock(Activity::class.java),
+    ): PluginRegistry.NewIntentListener {
+        val binding = Mockito.mock(ActivityPluginBinding::class.java)
+        Mockito.`when`(binding.activity).thenReturn(activity)
+        plugin.onAttachedToActivity(binding)
+        val captor = ArgumentCaptor.forClass(PluginRegistry.NewIntentListener::class.java)
+        Mockito.verify(binding).addOnNewIntentListener(captor.capture())
+        return captor.value
+    }
+
+    // The stubbed test Looper makes runOnMainThread run inline (myLooper and
+    // getMainLooper both default to null), so mint round trips are synchronous here.
+
+    private fun attach(
+        plugin: PosthogFlutterPlugin,
+        messenger: BinaryMessenger,
+    ): FlutterPlugin.FlutterPluginBinding {
+        val binding = Mockito.mock(FlutterPlugin.FlutterPluginBinding::class.java)
+        Mockito.`when`(binding.applicationContext).thenReturn(Mockito.mock(Context::class.java))
+        Mockito.`when`(binding.binaryMessenger).thenReturn(messenger)
+        plugin.onAttachedToEngine(binding)
+        return binding
+    }
+
+    private fun setupWithIdentityProvider(plugin: PosthogFlutterPlugin): (String, String, (String?) -> Unit) -> Unit {
+        val call =
+            MethodCall(
+                "setup",
+                mapOf("projectToken" to "test-token", "pushIdentityProviderEnabled" to true),
+            )
+        plugin.onMethodCall(call, Mockito.mock(MethodChannel.Result::class.java))
+        return assertNotNull(plugin.lastBuiltConfig?.pushIdentityProvider)
+    }
+
+    private fun replyToMint(
+        messenger: BinaryMessenger,
+        response: ByteBuffer?,
+        invocation: Int = 1,
+    ): MethodCall {
+        val messageCaptor = ArgumentCaptor.forClass(ByteBuffer::class.java)
+        val replyCaptor = ArgumentCaptor.forClass(BinaryMessenger.BinaryReply::class.java)
+        Mockito
+            .verify(messenger, Mockito.times(invocation))
+            .send(Mockito.eq("posthog_flutter"), messageCaptor.capture(), replyCaptor.capture())
+        val message = messageCaptor.value.also { it.rewind() }
+        replyCaptor.value.reply(response)
+        return StandardMethodCodec.INSTANCE.decodeMethodCall(message)
+    }
+
+    private fun successEnvelope(value: Any?): ByteBuffer = StandardMethodCodec.INSTANCE.encodeSuccessEnvelope(value).also { it.rewind() }
+
+    private data class ProviderHarness(
+        val plugin: PosthogFlutterPlugin,
+        val messenger: BinaryMessenger,
+        val binding: FlutterPlugin.FlutterPluginBinding,
+        val provider: (String, String, (String?) -> Unit) -> Unit,
+    )
+
+    private fun pluginWithProvider(): ProviderHarness {
+        val plugin = PosthogFlutterPlugin()
+        val messenger = Mockito.mock(BinaryMessenger::class.java)
+        val binding = attach(plugin, messenger)
+        return ProviderHarness(plugin, messenger, binding, setupWithIdentityProvider(plugin))
+    }
+
+    @Test
+    fun pushIdentityProvider_mintsThroughEngineThatRanSetup() {
+        val owner = pluginWithProvider()
+
+        var minted: String? = null
+        owner.provider("user-1", "com.example.app") { minted = it }
+
+        val sent = replyToMint(owner.messenger, successEnvelope("minted-token"))
+        assertEquals("pushIdentityProvider", sent.method)
+        assertEquals(
+            mapOf("distinctId" to "user-1", "appId" to "com.example.app"),
+            sent.arguments,
+        )
+        assertEquals("minted-token", minted)
+    }
+
+    @Test
+    fun pushIdentityProvider_dartError_declinesWithNullToken() {
+        val owner = pluginWithProvider()
+
+        var minted: String? = "sentinel"
+        owner.provider("user-1", "com.example.app") { minted = it }
+        replyToMint(
+            owner.messenger,
+            StandardMethodCodec.INSTANCE
+                .encodeErrorEnvelope("MINT_FAILED", "backend down", null)
+                .also { it.rewind() },
+        )
+
+        assertNull(minted)
+    }
+
+    @Test
+    fun pushIdentityProvider_notImplemented_declinesWithNullToken() {
+        val owner = pluginWithProvider()
+
+        var minted: String? = "sentinel"
+        owner.provider("user-1", "com.example.app") { minted = it }
+        // A null binary reply is how the channel signals notImplemented.
+        replyToMint(owner.messenger, null)
+
+        assertNull(minted)
+    }
+
+    @Test
+    fun pushIdentityProvider_secondarySetupNeitherStealsNorOrphansRoute() {
+        val owner = pluginWithProvider()
+
+        // A background isolate (firebase_messaging pattern) legitimately re-runs
+        // setup() with the same provider-enabled config. The native SDK no-ops
+        // the duplicate setup; the mint route must stay with the live owner...
+        val background = PosthogFlutterPlugin()
+        val backgroundMessenger = Mockito.mock(BinaryMessenger::class.java)
+        val backgroundBinding = attach(background, backgroundMessenger)
+        setupWithIdentityProvider(background)
+
+        var minted: String? = null
+        owner.provider("user-1", "app") { minted = it }
+        replyToMint(owner.messenger, successEnvelope("tok-1"))
+        assertEquals("tok-1", minted)
+        Mockito
+            .verify(backgroundMessenger, Mockito.never())
+            .send(Mockito.any(), Mockito.any(), Mockito.any())
+
+        // ...and its detach must not orphan the owner's route.
+        background.onDetachedFromEngine(backgroundBinding)
+        owner.provider("user-1", "app") { minted = it }
+        replyToMint(owner.messenger, successEnvelope("tok-2"), invocation = 2)
+        assertEquals("tok-2", minted)
+    }
+
+    @Test
+    fun pushIdentityProvider_secondaryEngineNeitherStealsNorClearsRoute() {
+        val owner = pluginWithProvider()
+
+        // A secondary engine (firebase_messaging-style background isolate)
+        // attaches without running setup: it must not steal the mint route...
+        val background = PosthogFlutterPlugin()
+        val backgroundMessenger = Mockito.mock(BinaryMessenger::class.java)
+        val backgroundBinding = attach(background, backgroundMessenger)
+
+        var minted: String? = null
+        owner.provider("user-1", "app") { minted = it }
+        replyToMint(owner.messenger, successEnvelope("tok-1"))
+        assertEquals("tok-1", minted)
+        Mockito
+            .verify(backgroundMessenger, Mockito.never())
+            .send(Mockito.any(), Mockito.any(), Mockito.any())
+
+        // ...nor null it when it detaches.
+        background.onDetachedFromEngine(backgroundBinding)
+        owner.provider("user-1", "app") { minted = it }
+        replyToMint(owner.messenger, successEnvelope("tok-2"), invocation = 2)
+        assertEquals("tok-2", minted)
+    }
+
+    @Test
+    fun pushIdentityProvider_declinesPromptlyAfterOwnerDetach() {
+        val owner = pluginWithProvider()
+
+        // Declines synchronously instead of stalling the native 10s mint
+        // watchdog on a dead messenger.
+        owner.plugin.onDetachedFromEngine(owner.binding)
+        var declined = false
+        owner.provider("user-1", "app") { declined = it == null }
+
+        assertTrue(declined)
+        Mockito
+            .verify(owner.messenger, Mockito.never())
+            .send(Mockito.any(), Mockito.any(), Mockito.any())
+    }
+
+    @Test
+    fun pushIdentityProvider_reSetupAfterDetachRepointsRoute() {
+        val owner = pluginWithProvider()
+        owner.plugin.onDetachedFromEngine(owner.binding)
+
+        val reattachedMessenger = Mockito.mock(BinaryMessenger::class.java)
+        attach(owner.plugin, reattachedMessenger)
+        setupWithIdentityProvider(owner.plugin)
+
+        var minted: String? = null
+        owner.provider("user-1", "app") { minted = it }
+        replyToMint(reattachedMessenger, successEnvelope("tok-3"))
+        assertEquals("tok-3", minted)
+    }
+
+    @Test
+    fun pushIdentityProvider_ownerDetachPromotesSurvivingSetupEngine() {
+        // The orphaning ordering: a background isolate sets up first and owns the
+        // route, the main engine sets up during the overlap (anchor skipped), then
+        // the background engine dies. The route must promote to the surviving main
+        // engine instead of declining for the rest of the process.
+        val background = pluginWithProvider()
+
+        val main = PosthogFlutterPlugin()
+        val mainMessenger = Mockito.mock(BinaryMessenger::class.java)
+        attach(main, mainMessenger)
+        setupWithIdentityProvider(main)
+
+        background.plugin.onDetachedFromEngine(background.binding)
+
+        var minted: String? = null
+        background.provider("user-1", "app") { minted = it }
+        replyToMint(mainMessenger, successEnvelope("tok-main"))
+        assertEquals("tok-main", minted)
+        Mockito
+            .verify(background.messenger, Mockito.never())
+            .send(Mockito.any(), Mockito.any(), Mockito.any())
+    }
+
+    @Test
+    fun pushIdentityProvider_detachedCandidateIsNeverPromoted() {
+        // A candidate that detached before the owner must not be resurrected:
+        // owner detach with no survivors declines instead of routing to a dead channel.
+        val owner = pluginWithProvider()
+
+        val background = PosthogFlutterPlugin()
+        val backgroundMessenger = Mockito.mock(BinaryMessenger::class.java)
+        val backgroundBinding = attach(background, backgroundMessenger)
+        setupWithIdentityProvider(background)
+
+        background.onDetachedFromEngine(backgroundBinding)
+        owner.plugin.onDetachedFromEngine(owner.binding)
+
+        var declined = false
+        owner.provider("user-1", "app") { declined = it == null }
+
+        assertTrue(declined)
+        Mockito
+            .verify(backgroundMessenger, Mockito.never())
+            .send(Mockito.any(), Mockito.any(), Mockito.any())
     }
 }

@@ -14,11 +14,15 @@ class MaskingTestsScreen extends StatefulWidget {
 class _MaskingTestsScreenState extends State<MaskingTestsScreen> {
   final TextEditingController _singleLineController = TextEditingController();
   final TextEditingController _multiLineController = TextEditingController();
+  final TextEditingController _autoGrowController = TextEditingController(
+    text: 'Line one\nLine two\nLine three\nLine four',
+  );
 
   @override
   void dispose() {
     _singleLineController.dispose();
     _multiLineController.dispose();
+    _autoGrowController.dispose();
     super.dispose();
   }
 
@@ -60,15 +64,15 @@ class _MaskingTestsScreenState extends State<MaskingTestsScreen> {
                   text: const TextSpan(
                     style: TextStyle(fontSize: 16, color: Colors.black),
                     children: [
-                      TextSpan(text: 'This is '),
+                      TextSpan(text: 'This RichText is masked '),
                       TextSpan(
-                        text: 'sensitive data',
+                        text: 'when maskAllTexts',
                         style: TextStyle(
                           fontWeight: FontWeight.bold,
                           color: Colors.red,
                         ),
                       ),
-                      TextSpan(text: ' that should be masked.'),
+                      TextSpan(text: ' is enabled'),
                     ],
                   ),
                 ),
@@ -78,7 +82,7 @@ class _MaskingTestsScreenState extends State<MaskingTestsScreen> {
               _buildTestSection(
                 'Test 3: SelectableText',
                 const SelectableText(
-                  'This SelectableText should also be masked',
+                  'This SelectableText is masked when maskAllTexts is enabled',
                   style: TextStyle(fontSize: 14, color: Colors.blue),
                 ),
               ),
@@ -218,6 +222,21 @@ class _MaskingTestsScreenState extends State<MaskingTestsScreen> {
                 ),
               ),
 
+              // Test 11b: Auto-growing TextField
+              _buildTestSection(
+                'Test 11b: Auto-growing TextField (maxLines: null)',
+                TextField(
+                  controller: _autoGrowController,
+                  maxLines: null,
+                  style: const TextStyle(fontSize: 16),
+                  decoration: const InputDecoration(
+                    hintText: 'Enter text, the field grows with it...',
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.all(12),
+                  ),
+                ),
+              ),
+
               // Test 12: Dense TextField (potential layout issue)
               _buildTestSection(
                 'Test 12: Dense TextField (isDense: true)',
@@ -250,6 +269,33 @@ class _MaskingTestsScreenState extends State<MaskingTestsScreen> {
               _buildTestSection(
                 'Test 14: PostHogMaskWidget + TextFormField (password)',
                 const _MaskedPasswordField(),
+              ),
+
+              // Test 15: PostHogMaskWidget around several masked children.
+              // The amber box matches no masking rule on its own, so it is
+              // covered only if the wrapper contributes its own rect.
+              _buildTestSection(
+                'Test 15: PostHogMaskWidget with multiple children',
+                PostHogMaskWidget(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Flexible(
+                        child: Text(
+                          'Jane Doe',
+                          style: TextStyle(fontSize: 14, color: Colors.black),
+                        ),
+                      ),
+                      Container(width: 48, height: 48, color: Colors.amber),
+                      const Flexible(
+                        child: Text(
+                          'Balance: 1234',
+                          style: TextStyle(fontSize: 14, color: Colors.black),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
 
               const SizedBox(height: 40),

@@ -14,6 +14,7 @@ fun PostHogDisplaySurvey.toMap(): Map<String, Any?> {
         mutableMapOf<String, Any?>(
             "id" to id,
             "name" to name,
+            "initialQuestionIndex" to initialQuestionIndex,
             "questions" to
                 questions.map { question: PostHogDisplaySurveyQuestion ->
                     val questionMap =
@@ -24,7 +25,7 @@ fun PostHogDisplaySurvey.toMap(): Map<String, Any?> {
                         )
 
                     questionMap["questionDescription"] = question.questionDescription
-                    questionMap["questionDescriptionContentType"] = question.questionDescriptionContentType?.value
+                    questionMap["questionDescriptionContentType"] = question.questionDescriptionContentType.value
                     questionMap["buttonText"] = question.buttonText
 
                     // Add question type-specific properties
@@ -36,6 +37,7 @@ fun PostHogDisplaySurvey.toMap(): Map<String, Any?> {
 
                         is PostHogDisplayRatingQuestion -> {
                             questionMap["type"] = "rating"
+                            questionMap["skipSubmitButton"] = question.skipSubmitButton
                             questionMap["ratingType"] = question.ratingType.value
                             questionMap["scaleLowerBound"] = question.scaleLowerBound
                             questionMap["scaleUpperBound"] = question.scaleUpperBound
@@ -45,6 +47,7 @@ fun PostHogDisplaySurvey.toMap(): Map<String, Any?> {
 
                         is PostHogDisplayChoiceQuestion -> {
                             questionMap["type"] = if (question.isMultipleChoice) "multiple_choice" else "single_choice"
+                            questionMap["skipSubmitButton"] = question.skipSubmitButton
                             questionMap["choices"] = question.choices
                             questionMap["hasOpenChoice"] = question.hasOpenChoice
                             questionMap["shuffleOptions"] = question.shuffleOptions
@@ -81,6 +84,11 @@ fun PostHogDisplaySurvey.toMap(): Map<String, Any?> {
                 "thankYouMessageDescription" to app.thankYouMessageDescription,
                 "thankYouMessageDescriptionContentType" to app.thankYouMessageDescriptionContentType?.value,
                 "thankYouMessageCloseButtonText" to app.thankYouMessageCloseButtonText,
+                "displayIntroScreen" to app.displayIntroScreen,
+                "introScreenHeader" to app.introScreenHeader,
+                "introScreenDescription" to app.introScreenDescription,
+                "introScreenDescriptionContentType" to app.introScreenDescriptionContentType?.value,
+                "introScreenButtonText" to app.introScreenButtonText,
             )
     }
 

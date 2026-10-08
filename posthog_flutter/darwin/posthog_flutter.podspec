@@ -15,14 +15,14 @@ Postog flutter plugin
   s.source           = { :path => '.' }
   s.social_media_url = 'https://twitter.com/PostHog'
 
-  s.source_files = 'posthog_flutter/Sources/posthog_flutter/**/*'
+  s.source_files = 'posthog_flutter/Sources/posthog_flutter/**/*.swift'
   s.resource_bundles = { "PostHogFlutter" => "posthog_flutter/Sources/posthog_flutter/PrivacyInfo.xcprivacy" }
   
   s.ios.dependency 'Flutter'
   s.osx.dependency 'FlutterMacOS'
 
-  # ~> Version 3.59.3 up to, but not including, 4.0.0
-  s.dependency 'PostHog', '>= 3.59.3', '< 4.0.0'
+  # ~> Version 3.80.0 up to, but not including, 4.0.0
+  s.dependency 'PostHog', '>= 3.84.0', '< 4.0.0'
 
   s.ios.deployment_target = '13.0'
   # PH iOS SDK 3.0.0 requires >= 10.15

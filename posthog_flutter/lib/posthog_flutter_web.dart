@@ -10,10 +10,16 @@ import 'package:posthog_flutter/src/util/logging.dart';
 import 'package:posthog_flutter/src/utils/property_normalizer.dart';
 
 import 'src/feature_flag_result.dart';
+import 'src/logs/posthog_log_severity.dart';
 import 'src/posthog_config.dart';
+import 'src/posthog_constants.dart';
+import 'src/posthog_event.dart';
 import 'src/posthog_flutter_platform_interface.dart';
 import 'src/posthog_flutter_web_handler.dart';
+import 'src/utils/before_send.dart';
+import 'src/replay/web/web_canvas_mask_provider.dart';
 import 'src/utils/capture_utils.dart';
+import 'src/utils/flutter_version.dart';
 
 /// A web implementation of the PosthogFlutterPlatform of the PosthogFlutter plugin.
 class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
@@ -23,7 +29,26 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
   /// Stored configuration for accessing inAppIncludes and other settings
   PostHogConfig? _config;
 
-  // TODO: we should change the $lib and $lib_version to be the flutter one when capturing things
+  /// Copied at setup. Event beforeSend runs here, before posthog-js, the same
+  /// way [PosthogFlutterIO] runs it before the platform channel.
+  List<BeforeSendCallback> _beforeSendCallbacks = [];
+
+  Future<PostHogEvent?> _runBeforeSend(
+    String eventName,
+    Map<String, Object>? properties, {
+    Map<String, Object>? userProperties,
+    Map<String, Object>? userPropertiesSetOnce,
+  }) {
+    return applyBeforeSend(
+      _beforeSendCallbacks,
+      PostHogEvent(
+        event: eventName,
+        properties: properties,
+        userProperties: userProperties,
+        userPropertiesSetOnce: userPropertiesSetOnce,
+      ),
+    );
+  }
 
   static void registerWith(Registrar registrar) {
     final channel = MethodChannel(
@@ -68,6 +93,25 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
 
     final ph = posthog;
     _config = config;
+    _beforeSendCallbacks = config.beforeSend;
+
+    // posthog-js is initialized by the host app, so a few config options never
+    // reach it. Warn instead of silently ignoring them.
+    if (!config.preloadFeatureFlags) {
+      printIfDebug(
+        'Warning: PostHogConfig.preloadFeatureFlags is not applied on Flutter web. '
+        'posthog-js is initialized by your app, so set '
+        'advanced_disable_feature_flags_on_first_load in your posthog.init({...}) call instead.',
+      );
+    }
+    if (config.bootstrap != null) {
+      printIfDebug(
+        'Warning: PostHogConfig.bootstrap is not applied on Flutter web. '
+        'Configure bootstrap in your posthog.init({...}) call instead.',
+      );
+    }
+
+    WebCanvasMaskProvider(config).register();
 
     if (config.onFeatureFlags != null && ph != null) {
       final dartCallback = config.onFeatureFlags!;
@@ -125,11 +169,38 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
     Map<String, Object>? properties,
     Map<String, Object>? userProperties,
     Map<String, Object>? userPropertiesSetOnce,
-  }) async {
-    final extracted = CaptureUtils.extractUserProperties(
-      properties: properties,
+  }) {
+    return _capture(
+      eventName: eventName,
+      properties: withFlutterVersion(properties),
       userProperties: userProperties,
       userPropertiesSetOnce: userPropertiesSetOnce,
+    );
+  }
+
+  /// Captures [properties] as given. Callers add `$flutter_version` first;
+  /// renamed screen/exception events skip it so a beforeSend removal sticks.
+  Future<void> _capture({
+    required String eventName,
+    Map<String, Object>? properties,
+    Map<String, Object>? userProperties,
+    Map<String, Object>? userPropertiesSetOnce,
+  }) async {
+    final processedEvent = await _runBeforeSend(
+      eventName,
+      properties,
+      userProperties: userProperties,
+      userPropertiesSetOnce: userPropertiesSetOnce,
+    );
+    if (processedEvent == null) {
+      printIfDebug('[PostHog] Event dropped by beforeSend: $eventName');
+      return;
+    }
+
+    final extracted = CaptureUtils.extractUserProperties(
+      properties: processedEvent.properties,
+      userProperties: processedEvent.userProperties,
+      userPropertiesSetOnce: processedEvent.userPropertiesSetOnce,
     );
 
     final extractedProperties = extracted.properties;
@@ -149,7 +220,7 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
 
     return handleWebMethodCall(
       MethodCall('capture', {
-        'eventName': eventName,
+        'eventName': processedEvent.event,
         if (normalizedProperties != null) 'properties': normalizedProperties,
         if (normalizedUserProperties != null)
           'userProperties': normalizedUserProperties,
@@ -160,14 +231,69 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
   }
 
   @override
+  Future<void> captureLog({
+    required String body,
+    PostHogLogSeverity level = PostHogLogSeverity.info,
+    Map<String, Object>? attributes,
+    String? traceId,
+    String? spanId,
+    int? traceFlags,
+  }) async {
+    final normalizedAttributes =
+        attributes != null ? PropertyNormalizer.normalize(attributes) : null;
+
+    return handleWebMethodCall(
+      MethodCall('captureLog', {
+        'body': body,
+        'level': level.name,
+        if (normalizedAttributes != null) 'attributes': normalizedAttributes,
+        if (traceId != null) 'traceId': traceId,
+        if (spanId != null) 'spanId': spanId,
+        // traceFlags 0 is meaningful (W3C sampled-false); only omit when null.
+        if (traceFlags != null) 'traceFlags': traceFlags,
+      }),
+    );
+  }
+
+  @override
   Future<void> screen({
     required String screenName,
     Map<String, Object>? properties,
   }) async {
+    // The screen name argument wins over a properties `$screen_name`.
+    // beforeSend still runs after this and can change the name.
+    final propsWithScreenName = <String, Object>{
+      ...?properties,
+      PostHogPropertyName.screenName: screenName,
+    };
+
+    final processedEvent = await _runBeforeSend(
+      PostHogEventName.screen,
+      withFlutterVersion(propsWithScreenName),
+    );
+    if (processedEvent == null) {
+      printIfDebug('[PostHog] Screen event dropped by beforeSend: $screenName');
+      return;
+    }
+
+    if (processedEvent.event != PostHogEventName.screen) {
+      await _capture(
+        eventName: processedEvent.event,
+        properties: processedEvent.properties?.cast<String, Object>(),
+      );
+      return;
+    }
+
+    final finalScreenName =
+        processedEvent.properties?[PostHogPropertyName.screenName] as String? ??
+            screenName;
+    processedEvent.properties?.remove(PostHogPropertyName.screenName);
+    final remaining = processedEvent.properties;
+
     return handleWebMethodCall(
       MethodCall('screen', {
-        'screenName': screenName,
-        if (properties != null) 'properties': properties,
+        'screenName': finalScreenName,
+        if (remaining != null && remaining.isNotEmpty) 'properties': remaining,
       }),
     );
   }
@@ -341,6 +467,30 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
   }
 
   @override
+  Future<void> registerPushNotificationToken(
+    String deviceToken, {
+    String? appId,
+  }) async {
+    // Not supported on web - posthog-js has no push subscription API
+  }
+
+  @override
+  Future<void> unregisterPushNotificationToken() async {
+    // Not supported on web - posthog-js has no push subscription API
+  }
+
+  @override
+  Future<void> capturePushNotificationOpened({
+    String? title,
+    String? subtitle,
+    String? body,
+    Map<String, Object?>? payload,
+    String? action,
+  }) async {
+    // Not supported on web - posthog-js has no push subscription API
+  }
+
+  @override
   Future<void> captureException({
     required Object error,
     StackTrace? stackTrace,
@@ -356,15 +506,34 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
         inAppByDefault: _config?.errorTrackingConfig.inAppByDefault ?? true,
       );
 
+      final processedEvent = await _runBeforeSend(
+        PostHogEventName.exception,
+        withFlutterVersion(exceptionData.cast<String, Object>()),
+      );
+      if (processedEvent == null) {
+        printIfDebug(
+          '[PostHog] Exception event dropped by beforeSend: ${error.runtimeType}',
+        );
+        return;
+      }
+
+      if (processedEvent.event != PostHogEventName.exception) {
+        await _capture(
+          eventName: processedEvent.event,
+          properties: processedEvent.properties?.cast<String, Object>(),
+        );
+        return;
+      }
+
       final normalizedData = PropertyNormalizer.normalize(
-        exceptionData.cast<String, Object>(),
+        processedEvent.properties?.cast<String, Object>() ?? <String, Object>{},
       );
 
-      return handleWebMethodCall(
+      return await handleWebMethodCall(
         MethodCall('captureException', {'properties': normalizedData}),
       );
-    } on Exception catch (exception) {
-      printIfDebug('Exception in captureException: $exception');
+    } catch (error) {
+      printIfDebug('Exception in captureException: $error');
     }
   }
 
@@ -386,5 +555,21 @@ class PosthogFlutterWeb extends PosthogFlutterPlatformInterface {
       const MethodCall('isSessionReplayActive'),
     );
     return result as bool? ?? false;
+  }
+
+  @override
+  Future<void> addExceptionStep(
+    String message, {
+    Map<String, Object>? properties,
+  }) async {
+    final normalizedProperties =
+        properties != null ? PropertyNormalizer.normalize(properties) : null;
+
+    return handleWebMethodCall(
+      MethodCall('addExceptionStep', {
+        'message': message,
+        if (normalizedProperties != null) 'properties': normalizedProperties,
+      }),
+    );
   }
 }

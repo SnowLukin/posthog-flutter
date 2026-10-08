@@ -5,11 +5,9 @@
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
-import 'package:posthog_flutter/src/util/platform_io_stub.dart'
-    if (dart.library.io) 'package:posthog_flutter/src/util/platform_io_real.dart';
 
 import 'isolate_handler_io.dart'
-    if (dart.library.html) 'isolate_handler_web.dart';
+    if (dart.library.js_interop) 'isolate_handler_web.dart';
 import 'package:posthog_flutter/src/util/logging.dart';
 
 import '../posthog_flutter_platform_interface.dart';
@@ -24,6 +22,8 @@ class PostHogErrorTrackingAutoCaptureIntegration {
   // Store original handlers (we'll chain with them from our handler)
   FlutterExceptionHandler? _originalFlutterErrorHandler;
   ErrorCallback? _originalPlatformErrorHandler;
+  FlutterExceptionHandler? _flutterErrorHandler;
+  ErrorCallback? _platformErrorHandler;
 
   // Isolate error handling
   final IsolateErrorHandler _isolateErrorHandler = IsolateErrorHandler();
@@ -103,10 +103,12 @@ class PostHogErrorTrackingAutoCaptureIntegration {
     _isEnabled = false;
 
     // Restore original handlers only if our own handler is still set
-    if (FlutterError.onError == _posthogFlutterErrorHandler) {
+    if (_flutterErrorHandler != null &&
+        FlutterError.onError == _flutterErrorHandler) {
       FlutterError.onError = _originalFlutterErrorHandler;
     }
-    if (PlatformDispatcher.instance.onError == _posthogPlatformErrorHandler) {
+    if (_platformErrorHandler != null &&
+        PlatformDispatcher.instance.onError == _platformErrorHandler) {
       PlatformDispatcher.instance.onError = _originalPlatformErrorHandler;
     }
 
@@ -116,18 +118,25 @@ class PostHogErrorTrackingAutoCaptureIntegration {
     // release refs
     _originalFlutterErrorHandler = null;
     _originalPlatformErrorHandler = null;
+    _flutterErrorHandler = null;
+    _platformErrorHandler = null;
   }
 
   /// Flutter framework error handler
   void _setupFlutterErrorHandler() {
-    // prevent circular calls
-    if (FlutterError.onError == _posthogFlutterErrorHandler) {
-      return;
-    }
+    final originalHandler = FlutterError.onError;
+    _originalFlutterErrorHandler = originalHandler;
 
-    _originalFlutterErrorHandler = FlutterError.onError;
-
-    FlutterError.onError = _posthogFlutterErrorHandler;
+    // Retained wrappers must keep their own delegate and stay inactive on restart.
+    late final FlutterExceptionHandler handler;
+    handler = (details) {
+      if (identical(_flutterErrorHandler, handler)) {
+        _posthogFlutterErrorHandler(details);
+      }
+      originalHandler?.call(details);
+    };
+    _flutterErrorHandler = handler;
+    FlutterError.onError = handler;
   }
 
   void _posthogFlutterErrorHandler(FlutterErrorDetails details) {
@@ -167,29 +176,31 @@ class PostHogErrorTrackingAutoCaptureIntegration {
         "Error not captured because FlutterErrorDetails.silent is true and captureSilentFlutterErrors is false",
       );
     }
-
-    // Call the original handler, if any
-    _originalFlutterErrorHandler?.call(details);
   }
 
   /// Platform error handler for Dart runtime errors
   void _setupPlatformErrorHandler() {
-    // On web, PlatformDispatcher.onError is not implemented. Skip for now
+    // PlatformDispatcher.onError is not implemented on web.
     // See: https://github.com/flutter/flutter/issues/100277
-    if (!isSupportedPlatform()) {
+    if (kIsWeb) {
       return;
     }
 
-    // prevent circular calls
-    if (PlatformDispatcher.instance.onError == _posthogPlatformErrorHandler) {
-      return;
-    }
+    final originalHandler = PlatformDispatcher.instance.onError;
+    _originalPlatformErrorHandler = originalHandler;
 
-    _originalPlatformErrorHandler = PlatformDispatcher.instance.onError;
-    PlatformDispatcher.instance.onError = _posthogPlatformErrorHandler;
+    late final ErrorCallback handler;
+    handler = (error, stackTrace) {
+      if (identical(_platformErrorHandler, handler)) {
+        _posthogPlatformErrorHandler(error, stackTrace);
+      }
+      return originalHandler?.call(error, stackTrace) ?? false;
+    };
+    _platformErrorHandler = handler;
+    PlatformDispatcher.instance.onError = handler;
   }
 
-  bool _posthogPlatformErrorHandler(Object error, StackTrace stackTrace) {
+  void _posthogPlatformErrorHandler(Object error, StackTrace stackTrace) {
     final wrappedError = PostHogException(
       source: error,
       mechanism: 'PlatformDispatcher',
@@ -197,10 +208,6 @@ class PostHogErrorTrackingAutoCaptureIntegration {
     );
 
     _captureException(error: wrappedError, stackTrace: stackTrace);
-
-    // Call the original handler, if any
-    // False otherwise, so that default fallback mechanism is used
-    return _originalPlatformErrorHandler?.call(error, stackTrace) ?? false;
   }
 
   /// Isolate error handler for current isolate errors
@@ -211,7 +218,7 @@ class PostHogErrorTrackingAutoCaptureIntegration {
 
     // https://docs.flutter.dev/perf/isolates#web-platforms-and-compute
     // web has no isolates support
-    if (!isSupportedPlatform()) {
+    if (kIsWeb) {
       return;
     }
 

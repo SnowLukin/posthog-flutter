@@ -5,11 +5,15 @@ import 'package:posthog_flutter/src/util/logging.dart';
 class NativeCommunicator {
   static const MethodChannel _channel = MethodChannel('posthog_flutter');
 
-  Future<void> sendFullSnapshot(
+  /// Returns false when the channel call fails. Callers must not treat a
+  /// failed send as delivered.
+  Future<bool> sendFullSnapshot(
     Uint8List imageBytes, {
     required int id,
     required int x,
     required int y,
+    int? width,
+    int? height,
   }) async {
     try {
       await _channel.invokeMethod('sendFullSnapshot', {
@@ -17,13 +21,19 @@ class NativeCommunicator {
         'id': id,
         'x': x,
         'y': y,
+        if (width != null) 'width': width,
+        if (height != null) 'height': height,
       });
+      return true;
     } catch (e) {
       printIfDebug('Error sending full snapshot to native: $e');
+      return false;
     }
   }
 
-  Future<void> sendMetaEvent({
+  /// Returns false when the channel call fails. Callers must not treat a
+  /// failed send as delivered.
+  Future<bool> sendMetaEvent({
     required int width,
     required int height,
     required String? screen,
@@ -34,20 +44,77 @@ class NativeCommunicator {
         'height': height,
         'screen': screen,
       });
+      return true;
     } catch (e) {
-      printIfDebug('Error sending full snapshot to native: $e');
+      printIfDebug('Error sending meta event to native: $e');
+      return false;
     }
   }
 
-  Future<bool> isSessionReplayActive() async {
+  /// Reads the native replay state for one capture tick: whether capture should
+  /// run at all, and the session id the captured frame belongs to. The two
+  /// travel together so the capturer can key its per-session reset on the id the
+  /// native SDK actually holds without a second round trip per tick.
+  ///
+  /// Non-mutating on both platforms, so a rotation is observed one tick late.
+  Future<({bool isActive, String? sessionId})> getSessionReplayState() async {
     if (kIsWeb) {
       // Flutter doesn't capture screenshots on web, JS SDK handles session replay
+      return (isActive: false, sessionId: null);
+    }
+    try {
+      final state = await _channel.invokeMapMethod<String, Object?>(
+        'getSessionReplayState',
+      );
+      return (
+        isActive: state?['isActive'] as bool? ?? false,
+        sessionId: state?['sessionId'] as String?,
+      );
+    } catch (e) {
+      printIfDebug('Error checking session replay status: $e');
+      return (isActive: false, sessionId: null);
+    }
+  }
+
+  Future<List<Uint8List?>> captureNativeScreenshots(
+      List<Map<String, int>> views) async {
+    if (kIsWeb || views.isEmpty) {
+      return List.filled(views.length, null);
+    }
+    try {
+      final raw = await _channel.invokeListMethod<Object?>(
+        'captureNativeScreenshots',
+        {'views': views},
+      ).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => null,
+      );
+      if (raw == null) return List.filled(views.length, null);
+      return raw.map((e) => e as Uint8List?).toList();
+    } catch (e) {
+      printIfDebug('Error capturing native screenshots: $e');
+      return List.filled(views.length, null);
+    }
+  }
+
+  /// Asks the native occlusion detector to bridge-capture native screens for
+  /// the current occlusion episode; the native side disables bridging itself
+  /// when the episode ends. [episode] lets the native side decline a stale
+  /// request that arrives after its episode ended — accepting one would re-arm
+  /// the bridge for an episode Dart never asked about. Returns false when the
+  /// native side declined, so the caller can fall back to a placeholder.
+  Future<bool> enableNativeBridge({required int episode}) async {
+    if (kIsWeb) {
       return false;
     }
     try {
-      return await _channel.invokeMethod('isSessionReplayActive');
+      return await _channel.invokeMethod<bool>(
+            'enableNativeBridge',
+            {'episode': episode},
+          ) ??
+          false;
     } catch (e) {
-      printIfDebug('Error checking session replay status: $e');
+      printIfDebug('Error enabling native bridge: $e');
       return false;
     }
   }

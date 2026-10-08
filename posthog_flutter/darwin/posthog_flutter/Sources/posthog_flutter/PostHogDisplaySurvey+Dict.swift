@@ -9,6 +9,7 @@
             var dict: [String: Any] = [
                 "id": id,
                 "name": name,
+                "initialQuestionIndex": initialQuestionIndex,
                 "questions": questions.map { question -> [String: Any] in
                     var questionDict: [String: Any] = [
                         "question": question.question,
@@ -31,6 +32,7 @@
                         questionDict["link"] = linkQuestion.link
                     case let ratingQuestion as PostHogDisplayRatingQuestion:
                         questionDict["type"] = "rating"
+                        questionDict["skipSubmitButton"] = ratingQuestion.skipSubmitButton
                         questionDict["ratingType"] = ratingQuestion.ratingType.rawValue
                         questionDict["scaleLowerBound"] = ratingQuestion.scaleLowerBound
                         questionDict["scaleUpperBound"] = ratingQuestion.scaleUpperBound
@@ -38,6 +40,7 @@
                         questionDict["upperBoundLabel"] = ratingQuestion.upperBoundLabel
                     case let choiceQuestion as PostHogDisplayChoiceQuestion:
                         questionDict["type"] = choiceQuestion.isMultipleChoice ? "multiple_choice" : "single_choice"
+                        questionDict["skipSubmitButton"] = choiceQuestion.skipSubmitButton
                         questionDict["choices"] = choiceQuestion.choices
                         questionDict["hasOpenChoice"] = choiceQuestion.hasOpenChoice
                         questionDict["shuffleOptions"] = choiceQuestion.shuffleOptions
@@ -100,6 +103,17 @@
                 }
                 if let thankYouMessageCloseButtonText = appearance.thankYouMessageCloseButtonText {
                     appearanceDict["thankYouMessageCloseButtonText"] = thankYouMessageCloseButtonText
+                }
+                appearanceDict["displayIntroScreen"] = appearance.displayIntroScreen
+                if let introScreenHeader = appearance.introScreenHeader {
+                    appearanceDict["introScreenHeader"] = introScreenHeader
+                }
+                if let introScreenDescription = appearance.introScreenDescription {
+                    appearanceDict["introScreenDescription"] = introScreenDescription
+                    appearanceDict["introScreenDescriptionContentType"] = appearance.introScreenDescriptionContentType?.rawValue
+                }
+                if let introScreenButtonText = appearance.introScreenButtonText {
+                    appearanceDict["introScreenButtonText"] = introScreenButtonText
                 }
                 dict["appearance"] = appearanceDict
             }

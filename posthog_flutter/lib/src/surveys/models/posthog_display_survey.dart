@@ -17,7 +17,7 @@ class PostHogDisplaySurvey {
   // Native platform model -> Dictionary -> Dart model
   factory PostHogDisplaySurvey.fromDict(Map<String, dynamic> dict) {
     final questions = (dict['questions'] as List).map((q) {
-      final id = q['type'] as String? ?? '';
+      final id = q['id'] as String? ?? '';
       final type = q['type'] as String;
       final question = q['question'] as String;
       final optional = q['isOptional'] as bool;
@@ -45,6 +45,7 @@ class PostHogDisplaySurvey {
           return PostHogDisplayRatingQuestion(
             id: id,
             question: question,
+            skipSubmitButton: q['skipSubmitButton'] as bool? ?? false,
             ratingType: PostHogDisplaySurveyRatingType.fromInt(
               q['ratingType'] as int,
             ),
@@ -63,6 +64,7 @@ class PostHogDisplaySurvey {
             id: id,
             question: question,
             choices: (q['choices'] as List).cast<String>(),
+            skipSubmitButton: q['skipSubmitButton'] as bool? ?? false,
             isMultipleChoice: type == 'multiple_choice',
             hasOpenChoice: q['hasOpenChoice'] as bool,
             shuffleOptions: q['shuffleOptions'] as bool,
@@ -94,6 +96,11 @@ class PostHogDisplaySurvey {
       final thankYouMessageDescriptionContentType =
           PostHogDisplaySurveyTextContentType.fromInt(thankYouContentTypeRaw);
 
+      final introContentTypeRaw =
+          a['introScreenDescriptionContentType'] as int? ?? 1;
+      final introScreenDescriptionContentType =
+          PostHogDisplaySurveyTextContentType.fromInt(introContentTypeRaw);
+
       appearance = PostHogDisplaySurveyAppearance(
         fontFamily: a['fontFamily'] as String?,
         backgroundColor: a['backgroundColor'] as String?,
@@ -115,6 +122,11 @@ class PostHogDisplaySurvey {
             thankYouMessageDescriptionContentType,
         thankYouMessageCloseButtonText:
             a['thankYouMessageCloseButtonText'] as String?,
+        displayIntroScreen: a['displayIntroScreen'] as bool? ?? false,
+        introScreenHeader: a['introScreenHeader'] as String?,
+        introScreenDescription: a['introScreenDescription'] as String?,
+        introScreenDescriptionContentType: introScreenDescriptionContentType,
+        introScreenButtonText: a['introScreenButtonText'] as String?,
       );
     }
 
@@ -131,6 +143,8 @@ class PostHogDisplaySurvey {
     return PostHogDisplaySurvey(
       id: dict['id'] as String,
       name: dict['name'] as String,
+      initialQuestionIndex: dict['initialQuestionIndex'] as int? ?? 0,
+      presentationId: dict['presentationId'] as String?,
       questions: questions,
       appearance: appearance,
       startDate: startDate,
@@ -142,6 +156,8 @@ class PostHogDisplaySurvey {
     required this.id,
     required this.name,
     required this.questions,
+    this.initialQuestionIndex = 0,
+    this.presentationId,
     this.appearance,
     this.startDate,
     this.endDate,
@@ -149,6 +165,8 @@ class PostHogDisplaySurvey {
 
   final String id;
   final String name;
+  final int initialQuestionIndex;
+  final String? presentationId;
   final List<PostHogDisplaySurveyQuestion> questions;
   final PostHogDisplaySurveyAppearance? appearance;
   final DateTime? startDate;

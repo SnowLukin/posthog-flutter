@@ -1,7 +1,22 @@
 import 'dart:math' show sqrt;
 
 import 'package:flutter/material.dart';
+
 import 'posthog_display_survey_appearance.dart';
+
+/// Question [buttonText] of null or blank means [fallback].
+///
+/// The survey editor saves a cleared label as `""`, which is not null.
+/// A blank fallback uses `Submit`, the widget default.
+String surveyQuestionButtonLabel(String? buttonText, String fallback) {
+  if (buttonText != null && buttonText.trim().isNotEmpty) {
+    return buttonText;
+  }
+  if (fallback.trim().isNotEmpty) {
+    return fallback;
+  }
+  return 'Submit';
+}
 
 /// Appearance configuration for survey widgets
 @immutable
@@ -22,9 +37,14 @@ class SurveyAppearance {
     this.thankYouMessageHeader = 'Thank you for your feedback!',
     this.thankYouMessageDescription,
     this.thankYouMessageCloseButtonText = 'Close',
+    this.displayIntroScreen = false,
+    this.introScreenHeader,
+    this.introScreenDescription,
+    this.introScreenButtonText = 'Get started',
     this.borderColor = const Color(0xFFBDBDBD),
     this.inputBackgroundColor = Colors.white,
     this.inputTextColor = Colors.black,
+    this.inputPlaceholder,
     this.inputPlaceholderColor = const Color(0xFF757575),
     this.choiceButtonBorderColor = Colors.black,
     this.choiceButtonTextColor = Colors.black,
@@ -45,9 +65,14 @@ class SurveyAppearance {
   final String thankYouMessageHeader;
   final String? thankYouMessageDescription;
   final String thankYouMessageCloseButtonText;
+  final bool displayIntroScreen;
+  final String? introScreenHeader;
+  final String? introScreenDescription;
+  final String introScreenButtonText;
   final Color borderColor;
   final Color inputBackgroundColor;
   final Color inputTextColor;
+  final String? inputPlaceholder;
   final Color inputPlaceholderColor;
   final Color choiceButtonBorderColor;
   final Color choiceButtonTextColor;
@@ -78,6 +103,7 @@ class SurveyAppearance {
     // Input text color: use override if provided, otherwise auto-contrast from input background
     final inputTextColor = _colorFromHex(appearance?.inputTextColor) ??
         _getContrastingTextColor(inputBackgroundColor);
+    final inputPlaceholder = appearance?.placeholder;
 
     return SurveyAppearance(
       backgroundColor: backgroundColor,
@@ -101,10 +127,16 @@ class SurveyAppearance {
       thankYouMessageDescription: appearance?.thankYouMessageDescription,
       thankYouMessageCloseButtonText:
           appearance?.thankYouMessageCloseButtonText ?? 'Close',
+      displayIntroScreen: appearance?.displayIntroScreen ?? false,
+      introScreenHeader: appearance?.introScreenHeader,
+      introScreenDescription: appearance?.introScreenDescription,
+      introScreenButtonText: appearance?.introScreenButtonText ?? 'Get started',
       borderColor:
           _colorFromHex(appearance?.borderColor) ?? const Color(0xFFBDBDBD),
       inputBackgroundColor: inputBackgroundColor,
       inputTextColor: inputTextColor,
+      inputPlaceholder:
+          inputPlaceholder?.isNotEmpty == true ? inputPlaceholder : null,
       inputPlaceholderColor: inputTextColor.withAlpha(153),
       choiceButtonBorderColor: primaryTextColor,
       choiceButtonTextColor: primaryTextColor,

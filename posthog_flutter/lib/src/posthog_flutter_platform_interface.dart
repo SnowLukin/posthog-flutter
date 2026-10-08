@@ -1,6 +1,7 @@
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'feature_flag_result.dart';
+import 'logs/posthog_log_severity.dart';
 import 'posthog_config.dart';
 import 'posthog_flutter_io.dart';
 
@@ -35,6 +36,13 @@ abstract class PosthogFlutterPlatformInterface extends PlatformInterface {
     throw UnimplementedError('setup() has not been implemented.');
   }
 
+  /// Applies a runtime [PostHogSessionReplayConfig.captureNativeScreens]
+  /// change by starting or stopping the native occlusion detector.
+  ///
+  /// A no-op by default: only the mobile platforms have a detector, and web
+  /// must not throw when the config setter fires.
+  Future<void> setCaptureNativeScreens(bool enabled) async {}
+
   Future<void> identify({
     required String userId,
     Map<String, Object>? userProperties,
@@ -66,9 +74,47 @@ abstract class PosthogFlutterPlatformInterface extends PlatformInterface {
     throw UnimplementedError('screen() has not been implemented.');
   }
 
+  Future<void> captureLog({
+    required String body,
+    PostHogLogSeverity level = PostHogLogSeverity.info,
+    Map<String, Object>? attributes,
+    String? traceId,
+    String? spanId,
+    int? traceFlags,
+  }) {
+    throw UnimplementedError('captureLog() has not been implemented.');
+  }
+
   /// Opens a URL using the platform's default browser
   Future<void> openUrl(String url) {
     throw UnimplementedError('openUrl() has not been implemented.');
+  }
+
+  Future<void> registerPushNotificationToken(
+    String deviceToken, {
+    String? appId,
+  }) {
+    throw UnimplementedError(
+      'registerPushNotificationToken() has not been implemented.',
+    );
+  }
+
+  Future<void> unregisterPushNotificationToken() {
+    throw UnimplementedError(
+      'unregisterPushNotificationToken() has not been implemented.',
+    );
+  }
+
+  Future<void> capturePushNotificationOpened({
+    String? title,
+    String? subtitle,
+    String? body,
+    Map<String, Object?>? payload,
+    String? action,
+  }) {
+    throw UnimplementedError(
+      'capturePushNotificationOpened() has not been implemented.',
+    );
   }
 
   Future<void> alias({required String alias}) {
@@ -183,6 +229,13 @@ abstract class PosthogFlutterPlatformInterface extends PlatformInterface {
     Map<String, Object>? properties,
   }) {
     throw UnimplementedError('captureException() has not been implemented.');
+  }
+
+  Future<void> addExceptionStep(
+    String message, {
+    Map<String, Object>? properties,
+  }) {
+    throw UnimplementedError('addExceptionStep() has not been implemented.');
   }
 
   Future<void> close() {

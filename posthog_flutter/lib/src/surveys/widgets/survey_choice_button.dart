@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+
 import '../models/survey_appearance.dart';
+import 'survey_icon.dart';
 
 class SurveyChoiceButton extends StatelessWidget {
   const SurveyChoiceButton({
@@ -84,15 +86,17 @@ class SurveyChoiceButton extends StatelessWidget {
                         label,
                         style: TextStyle(
                           color: isSelected
-                              ? Colors.black
-                              : Colors.black.withValues(alpha: 0.5),
+                              ? appearance.choiceButtonTextColor
+                              : appearance.choiceButtonTextColor.withValues(
+                                  alpha: 0.5,
+                                ),
                           fontWeight: isSelected ? FontWeight.bold : null,
                         ),
                       ),
               ),
               if (isSelected)
-                Icon(
-                  Icons.check,
+                SurveyIcon(
+                  type: SurveyIconType.check,
                   size: 16,
                   color: appearance.choiceButtonTextColor,
                 ),
