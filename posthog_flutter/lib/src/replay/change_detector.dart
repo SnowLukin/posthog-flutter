@@ -23,8 +23,19 @@ import 'package:flutter/widgets.dart';
 class ChangeDetector {
   final VoidCallback onChange;
   final Duration interval;
+
   bool _isRunning = false;
   Timer? _timer;
+  int _forcedTicksLeft = 0;
+
+  bool hasCapturedPlatformViews = false;
+
+  /// While a native occlusion episode owns the replay, forcing frames would
+  /// make the hidden Flutter tree re-render every tick only for the capture
+  /// to be discarded.
+  bool suppressForcedFrames = false;
+
+  bool get isRunning => _isRunning;
 
   /// Creates a [ChangeDetector] with the given [onChange] callback.
   ///
@@ -39,11 +50,23 @@ class ChangeDetector {
     if (_isRunning) {
       return;
     }
-
     _isRunning = true;
-    _scheduleFrameCallback();
-    _timer = Timer.periodic(interval, (_) {
+    // A pending budget means a session boundary armed it, and forcing a frame
+    // now would record the screen the host has not replaced yet. Leave that
+    // first frame to the budget's own ticks. Any other start() — app launch, a
+    // recording resumed on the same session — still forces, or a static screen
+    // would record nothing until it happens to repaint.
+    if (_forcedTicksLeft > 0) {
       _scheduleFrameCallback();
+    } else {
+      requestImmediateSample();
+    }
+    _timer = Timer.periodic(interval, (_) {
+      final forceFrame = _forcedTicksLeft > 0;
+      if (forceFrame) {
+        _forcedTicksLeft--;
+      }
+      _scheduleFrameCallback(forceFrame: forceFrame);
     });
   }
 
@@ -56,12 +79,41 @@ class ChangeDetector {
     _timer = null;
   }
 
+  /// Keeps forcing a frame for up to [count] further poll ticks.
+  ///
+  /// One forced sample is not enough after a session change: iOS reports replay
+  /// inactive for ~120 ms after `reset()` while its flags reload, so the sample
+  /// is spent on a tick that captures nothing.
+  ///
+  /// Only delivery clears the budget, never [stop] — `close()` arms it and the
+  /// following `setup()` is what spends it.
+  void forceNextTicks(int count) {
+    _forcedTicksLeft = count;
+  }
+
+  /// Drops any retries armed by [forceNextTicks].
+  void cancelForcedTicks() {
+    _forcedTicksLeft = 0;
+  }
+
+  /// Samples once before the next poll tick. A static screen renders no frame on
+  /// its own, so without forcing one the post-frame callback never runs.
+  ///
+  /// Forces nothing while [suppressForcedFrames] is set, so a caller ending a
+  /// suppressed episode must clear that flag first.
+  void requestImmediateSample() {
+    _scheduleFrameCallback(forceFrame: true);
+  }
+
   /// Schedules a single post-frame callback to invoke [onChange].
-  void _scheduleFrameCallback() {
+  void _scheduleFrameCallback({bool forceFrame = false}) {
     if (!_isRunning) {
       return;
     }
 
+    if ((forceFrame || hasCapturedPlatformViews) && !suppressForcedFrames) {
+      WidgetsBinding.instance.scheduleFrame();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_isRunning) {
         onChange();

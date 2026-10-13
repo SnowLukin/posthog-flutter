@@ -1,4 +1,5 @@
 import 'package:posthog_flutter/src/feature_flag_result.dart';
+import 'package:posthog_flutter/src/logs/posthog_log_severity.dart';
 import 'package:posthog_flutter/src/posthog_config.dart';
 import 'package:posthog_flutter/src/posthog_flutter_platform_interface.dart';
 
@@ -15,11 +16,79 @@ class CapturedExceptionCall {
   });
 }
 
+/// Captured log call data
+class CapturedLogCall {
+  final String body;
+  final PostHogLogSeverity level;
+  final Map<String, Object>? attributes;
+  final String? traceId;
+  final String? spanId;
+  final int? traceFlags;
+
+  CapturedLogCall({
+    required this.body,
+    required this.level,
+    this.attributes,
+    this.traceId,
+    this.spanId,
+    this.traceFlags,
+  });
+}
+
+typedef CapturedPushOpenedCall = ({
+  String? title,
+  String? subtitle,
+  String? body,
+  Map<String, Object?>? payload,
+  String? action,
+});
+
 class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
+  final List<({String deviceToken, String? appId})> registeredPushTokens = [];
+  int unregisterPushTokenCalls = 0;
+  final List<CapturedPushOpenedCall> capturedPushOpened = [];
+
+  @override
+  Future<void> registerPushNotificationToken(
+    String deviceToken, {
+    String? appId,
+  }) async {
+    registeredPushTokens.add((deviceToken: deviceToken, appId: appId));
+  }
+
+  @override
+  Future<void> unregisterPushNotificationToken() async {
+    unregisterPushTokenCalls++;
+  }
+
+  @override
+  Future<void> capturePushNotificationOpened({
+    String? title,
+    String? subtitle,
+    String? body,
+    Map<String, Object?>? payload,
+    String? action,
+  }) async {
+    capturedPushOpened.add((
+      title: title,
+      subtitle: subtitle,
+      body: body,
+      payload: payload,
+      action: action,
+    ));
+  }
+
   String? screenName;
   OnFeatureFlagsCallback? registeredOnFeatureFlagsCallback;
   final List<CapturedExceptionCall> capturedExceptions = [];
   PostHogConfig? receivedConfig;
+
+  final List<bool> captureNativeScreensChanges = [];
+
+  @override
+  Future<void> setCaptureNativeScreens(bool enabled) async {
+    captureNativeScreensChanges.add(enabled);
+  }
 
   // Tracking for setPersonProperties calls
   final List<Map<String, dynamic>> setPersonPropertiesCalls = [];
@@ -37,6 +106,25 @@ class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
   int resetPersonPropertiesForFlagsCount = 0;
   final List<Map<String, dynamic>> setGroupPropertiesForFlagsCalls = [];
   final List<String?> resetGroupPropertiesForFlagsCalls = [];
+
+  /// Runs inside the platform round trip of the calls that cross a session
+  /// boundary, standing in for the work native does there — notably rotating
+  /// the session id, which happens while the call is still in flight.
+  Future<void> Function()? onSessionBoundaryCall;
+
+  // Overridden because the base implementations throw UnimplementedError.
+  @override
+  Future<void> reset() async {
+    await onSessionBoundaryCall?.call();
+  }
+
+  @override
+  Future<void> startSessionRecording({bool resumeCurrent = true}) async {
+    await onSessionBoundaryCall?.call();
+  }
+
+  @override
+  Future<void> stopSessionRecording() async {}
 
   @override
   Future<void> reloadFeatureFlags() async {
@@ -71,12 +159,36 @@ class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
     resetGroupPropertiesForFlagsCalls.add(groupType);
   }
 
+  // Tracking for captureLog calls (after Dart-side beforeSend has run)
+  final List<CapturedLogCall> capturedLogs = [];
+
   @override
   Future<void> screen({
     required String screenName,
     Map<String, Object>? properties,
   }) async {
     this.screenName = screenName;
+  }
+
+  @override
+  Future<void> captureLog({
+    required String body,
+    PostHogLogSeverity level = PostHogLogSeverity.info,
+    Map<String, Object>? attributes,
+    String? traceId,
+    String? spanId,
+    int? traceFlags,
+  }) async {
+    capturedLogs.add(
+      CapturedLogCall(
+        body: body,
+        level: level,
+        attributes: attributes,
+        traceId: traceId,
+        spanId: spanId,
+        traceFlags: traceFlags,
+      ),
+    );
   }
 
   @override
@@ -102,6 +214,20 @@ class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
     );
   }
 
+  // Tracking for addExceptionStep calls
+  final List<Map<String, Object?>> addExceptionStepCalls = [];
+
+  @override
+  Future<void> addExceptionStep(
+    String message, {
+    Map<String, Object>? properties,
+  }) async {
+    addExceptionStepCalls.add({
+      'message': message,
+      'properties': properties,
+    });
+  }
+
   @override
   Future<void> disable() async {}
 
@@ -109,7 +235,9 @@ class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
   Future<void> enable() async {}
 
   @override
-  Future<void> close() async {}
+  Future<void> close() async {
+    await onSessionBoundaryCall?.call();
+  }
 
   @override
   Future<void> setPersonProperties({
@@ -132,6 +260,8 @@ class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
     return featureFlagPayloads[key];
   }
 
+  PostHogFeatureFlagResult? featureFlagResult;
+
   @override
   Future<PostHogFeatureFlagResult?> getFeatureFlagResult({
     required String key,
@@ -139,18 +269,6 @@ class PosthogFlutterPlatformFake extends PosthogFlutterPlatformInterface {
   }) async {
     getFeatureFlagResultCalls.add({'key': key, 'sendEvent': sendEvent});
 
-    if (!featureFlagValues.containsKey(key)) {
-      return null;
-    }
-    final value = featureFlagValues[key];
-    final payload = featureFlagPayloads[key];
-    final enabled = value != null && value != false;
-    final variant = (value is String) ? value : null;
-    return PostHogFeatureFlagResult(
-      key: key,
-      enabled: enabled,
-      variant: variant,
-      payload: payload,
-    );
+    return featureFlagResult;
   }
 }

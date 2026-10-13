@@ -16,6 +16,7 @@ class RatingQuestion extends StatefulWidget {
     required this.onSubmit,
     this.buttonText,
     this.optional = false,
+    this.skipSubmitButton = false,
     this.scaleLowerBound = 1,
     this.scaleUpperBound = 5,
     this.type = PostHogDisplaySurveyRatingType.number,
@@ -29,13 +30,14 @@ class RatingQuestion extends StatefulWidget {
   final PostHogDisplaySurveyTextContentType? descriptionContentType;
   final String? buttonText;
   final bool optional;
+  final bool skipSubmitButton;
   final int scaleLowerBound;
   final int scaleUpperBound;
   final PostHogDisplaySurveyRatingType type;
   final String? lowerBoundLabel;
   final String? upperBoundLabel;
   final SurveyAppearance appearance;
-  final void Function(int) onSubmit;
+  final void Function(int?) onSubmit;
 
   @override
   State<RatingQuestion> createState() => _RatingQuestionState();
@@ -108,6 +110,11 @@ class _RatingQuestionState extends State<RatingQuestion> {
     final isSelected = _rating == value;
 
     void onTap() {
+      if (widget.skipSubmitButton) {
+        setState(() => _rating = value);
+        widget.onSubmit(value);
+        return;
+      }
       setState(() {
         // If clicking the same value, deselect it
         if (_rating == value) {
@@ -221,20 +228,23 @@ class _RatingQuestionState extends State<RatingQuestion> {
               ],
             ),
           ),
-        const SizedBox(height: 24),
-        Builder(
-          builder: (context) {
-            final rating = _rating;
-            return SurveyButton(
-              onPressed: _canSubmit && rating != null
-                  ? () => widget.onSubmit(rating)
-                  : null,
-              text: widget.buttonText ?? 'Submit',
-              appearance: widget.appearance,
-              enabled: _canSubmit,
-            );
-          },
-        ),
+        if (!widget.skipSubmitButton) ...[
+          const SizedBox(height: 24),
+          Builder(
+            builder: (context) {
+              final rating = _rating;
+              return SurveyButton(
+                onPressed: _canSubmit ? () => widget.onSubmit(rating) : null,
+                text: surveyQuestionButtonLabel(
+                  widget.buttonText,
+                  widget.appearance.submitButtonText,
+                ),
+                appearance: widget.appearance,
+                enabled: _canSubmit,
+              );
+            },
+          ),
+        ],
       ],
     );
   }
