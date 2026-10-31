@@ -66,8 +66,12 @@ android {
         testImplementation 'org.mockito:mockito-core:5.0.0'
         testImplementation 'org.robolectric:robolectric:4.14.1'
         testImplementation 'junit:junit:4.13.2'
+        testImplementation 'com.squareup.okhttp3:okhttp:4.12.0'
         testRuntimeOnly 'org.junit.vintage:junit-vintage-engine:5.10.1'
-        implementation 'com.posthog:posthog-android:[3.71.0,4.0.0)'
+        // close() keeps the queue by swapping the config's network status, which relies on
+        // how the SDK queue checks it. Bump together with PosthogFlutterPluginCloseTest.
+        implementation('com.posthog:posthog-android') { version { strictly '3.73.1' } }
+        implementation('com.posthog:posthog') { version { strictly '6.47.7' } }
     }
 
     testOptions {

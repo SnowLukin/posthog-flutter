@@ -2129,6 +2129,12 @@ class PosthogFlutterPlugin :
 
     private fun close(result: Result) {
         try {
+            // PostHog.close() flushes first, and the caller may be closing to move to another
+            // host: the abandoned one answering 4xx would delete the batches. Reporting offline
+            // keeps them on disk for the next setup, as the iOS and desktop SDKs do on close.
+            PostHog.getConfig<PostHogConfig>()?.let { config ->
+                config.networkStatus = OfflineNetworkStatus(config.networkStatus)
+            }
             PostHog.close()
             result.success(null)
         } catch (e: Throwable) {

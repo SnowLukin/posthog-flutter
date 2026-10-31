@@ -862,6 +862,9 @@ class Posthog {
   /// recording. Whether the platform also changes the *session* here differs by
   /// platform, so do not rely on a [close]/[setup] pair rotating the session id.
   ///
+  /// On Android, iOS and desktop, queued events are not sent on close: they
+  /// stay on disk and go out after the next [setup], to its host.
+  ///
   /// Returns a [Future] that completes when platform resources have been closed.
   ///
   /// **Note:** After calling `close()`, surveys will not be rendered until the
